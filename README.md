@@ -27,22 +27,28 @@ This enables desktop applications (browsers, email clients, etc.) to store and r
 git clone https://github.com/nblogist/gopass-secret-service.git
 cd gopass-secret-service
 make build
-make install
+make install   # Installs to ~/.local/bin (no root required)
 ```
 
-### Manual Installation
+The default installation goes to `~/.local/bin`, which doesn't require root permissions. Make sure `~/.local/bin` is in your `PATH`:
 
 ```bash
-go build -o gopass-secret-service ./cmd/gopass-secret-service
-sudo install -m 755 gopass-secret-service /usr/local/bin/
+export PATH="$HOME/.local/bin:$PATH"  # Add to your .bashrc/.zshrc
+```
 
-# Install D-Bus service file for auto-activation
-mkdir -p ~/.local/share/dbus-1/services
-cat > ~/.local/share/dbus-1/services/org.freedesktop.secrets.service << EOF
-[D-BUS Service]
-Name=org.freedesktop.secrets
-Exec=/usr/local/bin/gopass-secret-service
-EOF
+### System-wide Installation
+
+```bash
+sudo make install-system   # Installs to /usr/local/bin
+```
+
+### Installation Options
+
+```bash
+make install                     # User-local: ~/.local/bin (default)
+make install PREFIX=/opt/myapps  # Custom location
+make install-system              # System-wide: /usr/local/bin (requires root)
+make help                        # Show all available targets
 ```
 
 ## Quick Start
