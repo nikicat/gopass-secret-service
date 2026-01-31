@@ -1,0 +1,14 @@
+# Binary (only in root)
+/gopass-secret-service
+
+# Test output
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
