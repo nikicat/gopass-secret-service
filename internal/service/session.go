@@ -114,12 +114,18 @@ func (m *SessionManager) CloseSession(path dbus.ObjectPath) error {
 // CloseAll closes all sessions
 func (m *SessionManager) CloseAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	// Copy sessions to avoid holding lock during close (prevents deadlock)
+	sessions := make([]*Session, 0, len(m.sessions))
 	for _, session := range m.sessions {
-		session.close()
+		sessions = append(sessions, session)
 	}
 	m.sessions = make(map[string]*Session)
+	m.mu.Unlock()
+
+	// Close sessions without holding the lock
+	for _, session := range sessions {
+		session.closeWithoutCallback()
+	}
 }
 
 // Path returns the session's D-Bus path
@@ -157,6 +163,25 @@ func (s *Session) close() {
 	if s.onClose != nil {
 		s.onClose()
 	}
+}
+
+// closeWithoutCallback closes the session without calling onClose
+// Used during bulk cleanup to avoid deadlock
+func (s *Session) closeWithoutCallback() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return
+	}
+	s.closed = true
+
+	// Unexport from D-Bus
+	s.conn.Export(nil, s.path, dbtypes.SessionInterface)
+	s.conn.Export(nil, s.path, "org.freedesktop.DBus.Introspectable")
+
+	// Close crypto session
+	s.crypto.Close()
 }
 
 // Encrypt encrypts data using this session's crypto

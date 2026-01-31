@@ -112,9 +112,16 @@ func ParsePromptPath(path dbus.ObjectPath) (string, error) {
 // CloseAll closes all prompts
 func (m *PromptManager) CloseAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	// Copy prompts to avoid holding lock during cleanup
+	prompts := make([]*Prompt, 0, len(m.prompts))
 	for _, prompt := range m.prompts {
+		prompts = append(prompts, prompt)
+	}
+	m.prompts = make(map[string]*Prompt)
+	m.mu.Unlock()
+
+	// Cleanup prompts without holding the lock
+	for _, prompt := range prompts {
 		prompt.cleanup()
 	}
 	m.prompts = make(map[string]*Prompt)
