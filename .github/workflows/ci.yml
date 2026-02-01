@@ -92,3 +92,15 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t gopass-secret-service-test .
+
+      - name: Run integration tests
+        run: docker run --rm gopass-secret-service-test

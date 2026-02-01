@@ -1,0 +1,22 @@
+# Binaries
+gopass-secret-service
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Test artifacts
+/tmp/
+*.log
+*.pid
+
+# Docker
+Dockerfile
+.dockerignore

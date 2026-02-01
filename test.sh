@@ -1,10 +1,12 @@
 #!/bin/bash
 
 # Test script for gopass-secret-service
+# Runs tests in an isolated D-Bus session with isolated gopass/GPG
 # Note: We don't use set -e because we want to continue on test failures
 
 BINARY="./gopass-secret-service"
 PID_FILE="/tmp/gopass-secret-service-test.pid"
+DBUS_PID_FILE="/tmp/gopass-secret-service-dbus.pid"
 LOG_FILE="/tmp/gopass-secret-service-test.log"
 TIMEOUT=5
 
@@ -14,19 +16,28 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Track if we started D-Bus ourselves
+STARTED_DBUS=false
+
+# Temporary directories for isolated testing
+TEST_TMPDIR=""
+ORIGINAL_HOME="$HOME"
+ORIGINAL_GNUPGHOME="${GNUPGHOME:-}"
+
 cleanup() {
     echo -e "${YELLOW}Cleaning up...${NC}"
 
+    # Stop the service
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
         if kill -0 "$PID" 2>/dev/null; then
-            echo "Sending SIGTERM to PID $PID..."
+            echo "Sending SIGTERM to service PID $PID..."
             kill -TERM "$PID" 2>/dev/null || true
 
             # Wait for graceful shutdown
             for i in $(seq 1 $TIMEOUT); do
                 if ! kill -0 "$PID" 2>/dev/null; then
-                    echo -e "${GREEN}Process terminated gracefully${NC}"
+                    echo -e "${GREEN}Service terminated gracefully${NC}"
                     break
                 fi
                 sleep 1
@@ -34,23 +45,174 @@ cleanup() {
 
             # Force kill if still running
             if kill -0 "$PID" 2>/dev/null; then
-                echo -e "${YELLOW}Process still running, sending SIGKILL...${NC}"
+                echo -e "${YELLOW}Service still running, sending SIGKILL...${NC}"
                 kill -9 "$PID" 2>/dev/null || true
             fi
         fi
         rm -f "$PID_FILE"
     fi
 
-    # Also kill any other instances
-    pkill -f "gopass-secret-service" 2>/dev/null || true
+    # Stop D-Bus daemon if we started it
+    if [ "$STARTED_DBUS" = true ] && [ -f "$DBUS_PID_FILE" ]; then
+        DBUS_PID=$(cat "$DBUS_PID_FILE")
+        if kill -0 "$DBUS_PID" 2>/dev/null; then
+            echo "Stopping D-Bus daemon (PID $DBUS_PID)..."
+            kill -TERM "$DBUS_PID" 2>/dev/null || true
+        fi
+        rm -f "$DBUS_PID_FILE"
+    fi
+
+    # Restore original environment
+    export HOME="$ORIGINAL_HOME"
+    if [ -n "$ORIGINAL_GNUPGHOME" ]; then
+        export GNUPGHOME="$ORIGINAL_GNUPGHOME"
+    else
+        unset GNUPGHOME
+    fi
+
+    # Clean up temporary directory
+    if [ -n "$TEST_TMPDIR" ] && [ -d "$TEST_TMPDIR" ]; then
+        echo "Removing temporary test directory..."
+        rm -rf "$TEST_TMPDIR"
+    fi
 
     echo "Cleanup complete"
+}
+
+start_dbus() {
+    # Check if we already have a working D-Bus session
+    if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+        if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+            echo "Using existing D-Bus session: $DBUS_SESSION_BUS_ADDRESS"
+            return 0
+        fi
+    fi
+
+    echo "Starting isolated D-Bus session..."
+
+    # Use dbus-run-session if available (preferred method)
+    if command -v dbus-run-session &> /dev/null; then
+        # For dbus-run-session, we need to exec this script within the session
+        if [ -z "$DBUS_SESSION_STARTED" ]; then
+            export DBUS_SESSION_STARTED=1
+            exec dbus-run-session -- "$0" "$@"
+        fi
+        echo "Running inside dbus-run-session"
+        return 0
+    fi
+
+    # Fallback: start dbus-daemon manually
+    # Create a temporary file for the address
+    DBUS_ADDR_FILE=$(mktemp)
+
+    # Start dbus-daemon
+    dbus-daemon --session --fork --print-address > "$DBUS_ADDR_FILE" 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to start D-Bus daemon${NC}"
+        cat "$DBUS_ADDR_FILE"
+        rm -f "$DBUS_ADDR_FILE"
+        exit 1
+    fi
+
+    DBUS_SESSION_BUS_ADDRESS=$(cat "$DBUS_ADDR_FILE")
+    rm -f "$DBUS_ADDR_FILE"
+    export DBUS_SESSION_BUS_ADDRESS
+
+    # Find the PID by looking for our dbus-daemon
+    DBUS_PID=$(pgrep -n dbus-daemon)
+    echo "$DBUS_PID" > "$DBUS_PID_FILE"
+    STARTED_DBUS=true
+
+    echo "D-Bus daemon started (PID: $DBUS_PID)"
+    echo "D-Bus address: $DBUS_SESSION_BUS_ADDRESS"
+
+    # Verify D-Bus is working
+    sleep 0.5
+    if ! dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
+        echo -e "${RED}D-Bus daemon started but not responding${NC}"
+        exit 1
+    fi
+}
+
+setup_isolated_environment() {
+    echo "Setting up isolated test environment..."
+
+    # Create temporary directory for all test data
+    TEST_TMPDIR=$(mktemp -d -t gopass-secret-service-test.XXXXXX)
+    echo "Test directory: $TEST_TMPDIR"
+
+    # Set up isolated HOME (all data stays within TEST_TMPDIR)
+    export HOME="$TEST_TMPDIR/home"
+    mkdir -p "$HOME"
+
+    # Set up isolated GNUPGHOME
+    export GNUPGHOME="$TEST_TMPDIR/gnupg"
+    mkdir -p "$GNUPGHOME"
+    chmod 700 "$GNUPGHOME"
+
+    # Set up isolated XDG directories to prevent any access to user's data
+    export XDG_CONFIG_HOME="$TEST_TMPDIR/config"
+    export XDG_DATA_HOME="$TEST_TMPDIR/data"
+    export XDG_CACHE_HOME="$TEST_TMPDIR/cache"
+    mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+
+    # Configure gpg-agent for non-interactive use
+    cat > "$GNUPGHOME/gpg-agent.conf" <<EOF
+allow-loopback-pinentry
+pinentry-program /usr/bin/pinentry-tty
+EOF
+
+    # Create a test GPG key (no passphrase for testing)
+    echo "Creating test GPG key..."
+    gpg --batch --gen-key <<EOF
+%no-protection
+Key-Type: RSA
+Key-Length: 2048
+Name-Real: Test User
+Name-Email: test@gopass-secret-service.local
+Expire-Date: 0
+%commit
+EOF
+
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to create test GPG key${NC}"
+        exit 1
+    fi
+
+    # Configure git (in isolated home, not global)
+    git config --global user.email "test@gopass-secret-service.local"
+    git config --global user.name "Test User"
+
+    # Check if gopass is available
+    if ! command -v gopass &> /dev/null; then
+        echo -e "${RED}gopass not found in PATH${NC}"
+        exit 1
+    fi
+
+    # Initialize gopass store within the temp directory
+    echo "Initializing test gopass store..."
+    GOPASS_STORE="$TEST_TMPDIR/gopass-store"
+    mkdir -p "$GOPASS_STORE"
+
+    gopass init --path "$GOPASS_STORE" test@gopass-secret-service.local
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to initialize gopass store${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Isolated environment ready${NC}"
 }
 
 # Set trap for cleanup on exit
 trap cleanup EXIT
 
-# Kill any existing instances
+# Start D-Bus session if needed
+start_dbus
+
+# Set up isolated gopass/GPG environment
+setup_isolated_environment
+
+# Kill any existing instances of our service
 echo "Killing any existing gopass-secret-service instances..."
 pkill -9 -f "gopass-secret-service" 2>/dev/null || true
 sleep 1
