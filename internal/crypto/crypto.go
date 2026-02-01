@@ -3,7 +3,7 @@ package crypto
 import (
 	"fmt"
 
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 // Session represents a crypto session for encrypting/decrypting secrets

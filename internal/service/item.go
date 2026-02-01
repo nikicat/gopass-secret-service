@@ -6,7 +6,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
 
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 // Item represents a D-Bus Secret Service item

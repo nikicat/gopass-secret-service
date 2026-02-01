@@ -24,7 +24,7 @@ This enables desktop applications (browsers, email clients, etc.) to store and r
 ### Build from Source
 
 ```bash
-git clone https://github.com/nblogist/gopass-secret-service.git
+git clone https://github.com/nikicat/gopass-secret-service.git
 cd gopass-secret-service
 make build
 make install   # Installs to ~/.local/bin (no root required)

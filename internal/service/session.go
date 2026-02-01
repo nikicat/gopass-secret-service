@@ -7,8 +7,8 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/google/uuid"
 
-	"github.com/nblogist/gopass-secret-service/internal/crypto"
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
+	"github.com/nikicat/gopass-secret-service/internal/crypto"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 // Session represents a D-Bus session for encrypted communication

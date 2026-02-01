@@ -8,9 +8,9 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
 
-	"github.com/nblogist/gopass-secret-service/internal/config"
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
-	"github.com/nblogist/gopass-secret-service/internal/store"
+	"github.com/nikicat/gopass-secret-service/internal/config"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
+	"github.com/nikicat/gopass-secret-service/internal/store"
 )
 
 // Service implements the org.freedesktop.Secret.Service interface

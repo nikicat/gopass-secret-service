@@ -1,7 +1,7 @@
 package crypto
 
 import (
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 // PlainSession implements the "plain" algorithm (no encryption)

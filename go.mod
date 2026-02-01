@@ -1,4 +1,4 @@
-module github.com/nblogist/gopass-secret-service
+module github.com/nikicat/gopass-secret-service
 
 go 1.25.6
 

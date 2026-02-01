@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/nblogist/gopass-secret-service/internal/config"
-	"github.com/nblogist/gopass-secret-service/internal/service"
+	"github.com/nikicat/gopass-secret-service/internal/config"
+	"github.com/nikicat/gopass-secret-service/internal/service"
 )
 
 // Version is set at build time

@@ -9,8 +9,8 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 	"github.com/google/uuid"
 
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
-	"github.com/nblogist/gopass-secret-service/internal/store"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
+	"github.com/nikicat/gopass-secret-service/internal/store"
 )
 
 // Collection represents a D-Bus Secret Service collection

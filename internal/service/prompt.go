@@ -7,7 +7,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/google/uuid"
 
-	dbtypes "github.com/nblogist/gopass-secret-service/internal/dbus"
+	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 // PromptAction represents the action to perform after a prompt completes
