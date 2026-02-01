@@ -157,8 +157,13 @@ func (i *Item) Delete() (dbus.ObjectPath, *dbus.Error) {
 		return "/", ErrObjectNotFound(err.Error())
 	}
 
-	// Unexport from D-Bus
-	i.Unexport()
+	// Remove from item manager (this also unexports)
+	i.svc.items.Remove(i.path)
+
+	// Update collection's Items property
+	if coll, ok := i.svc.collections.Get(i.collection); ok {
+		coll.refreshItems()
+	}
 
 	// Emit ItemDeleted signal
 	i.svc.emitItemDeleted(i.collection, i.path)

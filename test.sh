@@ -194,6 +194,17 @@ if echo "test-secret-value-$$" | timeout 10 secret-tool store --label="Test Secr
     # Test 9: Clear the secret
     run_test "Clear secret with secret-tool" \
         "timeout 10 secret-tool clear test-attr test-value-$$"
+
+    # Test 10: Verify deleted item is not accessible
+    echo -n "Test: Deleted item not accessible... "
+    LOOKUP_AFTER_DELETE=$(timeout 10 secret-tool lookup test-attr test-value-$$ 2>&1)
+    if [ -z "$LOOKUP_AFTER_DELETE" ]; then
+        echo -e "${GREEN}PASSED${NC}"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAILED${NC} (item still accessible after delete)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
 else
     echo -e "${RED}FAILED${NC}"
     TESTS_FAILED=$((TESTS_FAILED + 1))
