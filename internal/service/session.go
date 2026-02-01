@@ -13,14 +13,14 @@ import (
 
 // Session represents a D-Bus session for encrypted communication
 type Session struct {
-	path      dbus.ObjectPath
-	id        string
-	crypto    crypto.Session
-	clientID  string
-	conn      *dbus.Conn
-	mu        sync.RWMutex
-	closed    bool
-	onClose   func()
+	path     dbus.ObjectPath
+	id       string
+	crypto   crypto.Session
+	clientID string
+	conn     *dbus.Conn
+	mu       sync.RWMutex
+	closed   bool
+	onClose  func()
 }
 
 // SessionManager manages active sessions
