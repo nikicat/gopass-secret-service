@@ -88,10 +88,23 @@ for i in $(seq 1 10); do
     sleep 1
 done
 
-# Wait a bit more for initialization to complete
+# Wait for full initialization (check for "Service started successfully" in log)
 echo "Waiting for initialization..."
-sleep 3
-echo -e "${GREEN}Service ready!${NC}"
+for i in $(seq 1 15); do
+    if grep -q "Service started successfully" "$LOG_FILE" 2>/dev/null; then
+        echo -e "${GREEN}Service ready!${NC}"
+        break
+    fi
+    if ! kill -0 "$PID" 2>/dev/null; then
+        echo -e "${RED}Service exited during initialization!${NC}"
+        cat "$LOG_FILE"
+        exit 1
+    fi
+    sleep 1
+done
+if ! grep -q "Service started successfully" "$LOG_FILE" 2>/dev/null; then
+    echo -e "${YELLOW}Warning: Service may not be fully initialized${NC}"
+fi
 
 # Verify service is responding
 if ! dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.DBus.Introspectable.Introspect >/dev/null 2>&1; then
@@ -164,7 +177,21 @@ if echo "test-secret-value-$$" | timeout 10 secret-tool store --label="Test Secr
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
-    # Test 8: Clear the secret
+    # Test 8: Duplicate prevention - store same attributes again
+    echo -n "Test: Duplicate prevention (same attrs)... "
+    echo "new-secret-value-$$" | timeout 10 secret-tool store --label="Test Secret 2 $$" test-attr test-value-$$ 2>&1
+    # Count items with these attributes - should be exactly 1
+    SEARCH_RESULT=$(timeout 10 secret-tool search test-attr test-value-$$ 2>&1)
+    ITEM_COUNT=$(echo "$SEARCH_RESULT" | grep -c "^label = " || echo "0")
+    if [ "$ITEM_COUNT" = "1" ]; then
+        echo -e "${GREEN}PASSED${NC} (1 item, no duplicate)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAILED${NC} (found $ITEM_COUNT items, expected 1)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # Test 9: Clear the secret
     run_test "Clear secret with secret-tool" \
         "timeout 10 secret-tool clear test-attr test-value-$$"
 else

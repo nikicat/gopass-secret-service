@@ -376,41 +376,70 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 	}
 
 	if v, ok := properties["org.freedesktop.Secret.Item.Attributes"]; ok {
-		if a, ok := v.Value().(map[string]string); ok {
+		switch a := v.Value().(type) {
+		case map[string]string:
 			attributes = a
+		case map[string]dbus.Variant:
+			// D-Bus may send attributes as map[string]Variant
+			for k, vv := range a {
+				if s, ok := vv.Value().(string); ok {
+					attributes[k] = s
+				}
+			}
 		}
 	}
 
-	// Check for existing item with same attributes if replace is true
-	var existingID string
-	if replace && len(attributes) > 0 {
+	// Check for existing item with same attributes
+	// This prevents duplicates - a common practical requirement even though
+	// the spec technically allows duplicates when replace=false
+	var existingItem *store.ItemData
+	if len(attributes) > 0 {
 		existing, err := c.svc.store.SearchItems(c.name, attributes)
 		if err == nil && len(existing) > 0 {
-			existingID = existing[0].ID
+			// Find exact match (all attributes must match)
+			for _, item := range existing {
+				if attributesMatch(item.Attributes, attributes) {
+					existingItem = item
+					break
+				}
+			}
 		}
-	}
-
-	item := &store.ItemData{
-		Label:       label,
-		Secret:      plaintext,
-		ContentType: secret.ContentType,
-		Attributes:  attributes,
 	}
 
 	var itemID string
-	if existingID != "" {
-		// Update existing item
-		item.ID = existingID
-		if err := c.svc.store.UpdateItem(c.name, existingID, item); err != nil {
-			return "/", "/", ErrUnsupported(err.Error())
-		}
-		itemID = existingID
+	if existingItem != nil {
+		if replace {
+			// Update existing item's secret
+			existingItem.Secret = plaintext
+			existingItem.ContentType = secret.ContentType
+			if label != "" {
+				existingItem.Label = label
+			}
+			if err := c.svc.store.UpdateItem(c.name, existingItem.ID, existingItem); err != nil {
+				return "/", "/", ErrUnsupported(err.Error())
+			}
+			itemID = existingItem.ID
 
-		// Emit ItemChanged
-		itemPath := dbtypes.ItemPath(c.name, itemID)
-		c.svc.emitItemChanged(c.name, itemPath)
+			// Emit ItemChanged
+			itemPath := dbtypes.ItemPath(c.name, itemID)
+			c.svc.emitItemChanged(c.name, itemPath)
+		} else {
+			// Return existing item without modification (prevents duplicates)
+			itemID = existingItem.ID
+
+			// Make sure the item is exported
+			if _, err := c.svc.items.GetOrCreate(c.name, itemID); err != nil {
+				return "/", "/", ErrUnsupported(err.Error())
+			}
+		}
 	} else {
 		// Create new item - use hex format without hyphens for D-Bus path compatibility
+		item := &store.ItemData{
+			Label:       label,
+			Secret:      plaintext,
+			ContentType: secret.ContentType,
+			Attributes:  attributes,
+		}
 		rawID := uuid.New()
 		item.ID = fmt.Sprintf("i%x", rawID[:])
 		id, err := c.svc.store.CreateItem(c.name, item)
@@ -443,6 +472,19 @@ func (c *Collection) setLabel(label string) *dbus.Error {
 
 	c.svc.emitCollectionChanged(c.path)
 	return nil
+}
+
+// attributesMatch checks if two attribute maps are exactly equal
+func attributesMatch(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Collection) getItemPaths() []dbus.ObjectPath {

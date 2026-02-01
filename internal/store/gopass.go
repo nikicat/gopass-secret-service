@@ -442,10 +442,11 @@ func (s *GopassStore) parseMetadata(content string, handler func(key, value stri
 			continue
 		}
 
-		parts := strings.SplitN(line, ":", 2)
+		// Split on ": " to handle keys with colons (e.g., "xdg:schema")
+		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
+			key := parts[0]
+			value := parts[1]
 			handler(key, value)
 		}
 	}
@@ -475,13 +476,14 @@ func (s *GopassStore) parseItem(id, content string) (*ItemData, error) {
 			continue
 		}
 
-		parts := strings.SplitN(line, ":", 2)
+		// Split on ": " to handle keys with colons (e.g., "xdg:schema")
+		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) != 2 {
 			continue
 		}
 
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
+		key := parts[0]
+		value := parts[1]
 
 		switch key {
 		case labelKey:
