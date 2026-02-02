@@ -138,6 +138,47 @@ gopass-secret-service -r  # -r to replace if keyring is still running
 
 For permanent replacement, disable the GNOME Keyring secret service component in your session startup.
 
+## Troubleshooting
+
+### Startup Hangs with GPG Passphrase Prompt
+
+If gopass-secret-service hangs on startup waiting for a GPG passphrase (with a ~1 minute timeout), you may have a circular dependency:
+
+1. gopass-secret-service starts and initializes GoPass
+2. GoPass needs to decrypt the store, triggering GPG
+3. GPG uses `pinentry-gnome3` to prompt for the passphrase
+4. `pinentry-gnome3` tries to check libsecret (Secret Service) for cached passphrases
+5. But gopass-secret-service hasn't finished starting yet → deadlock
+
+**Solution:** Disable external password cache in gpg-agent while keeping pinentry-gnome3:
+
+```bash
+echo "no-allow-external-cache" >> ~/.gnupg/gpg-agent.conf
+gpgconf --kill gpg-agent
+```
+
+This only disables libsecret integration. GPG-agent's internal passphrase cache still works (controlled by `default-cache-ttl`, default 10 minutes), so you won't be prompted repeatedly.
+
+To increase the cache duration:
+
+```bash
+cat >> ~/.gnupg/gpg-agent.conf << 'EOF'
+no-allow-external-cache
+default-cache-ttl 28800
+max-cache-ttl 28800
+EOF
+gpgconf --kill gpg-agent
+```
+
+**Alternative:** Use a pinentry that doesn't use libsecret:
+
+```bash
+echo "pinentry-program /usr/bin/pinentry-qt" >> ~/.gnupg/gpg-agent.conf
+gpgconf --kill gpg-agent
+```
+
+Other options: `pinentry-gtk`, `pinentry-curses`, `pinentry-tty`.
+
 ## Compatibility
 
 Tested with:
