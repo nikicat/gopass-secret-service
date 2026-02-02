@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -55,7 +56,8 @@ func (c *Collection) Export() error {
 
 	log.Printf("Collection.Export: getting collection data...")
 	// Get collection data for initial property values
-	collData, err := c.svc.store.GetCollection(c.name)
+	ctx := context.Background()
+	collData, err := c.svc.store.GetCollection(ctx, c.name)
 	if err != nil {
 		log.Printf("Collection.Export: failed to get collection data: %v", err)
 	}
@@ -199,7 +201,8 @@ func (c *Collection) ExportAtPath(path dbus.ObjectPath) error {
 	}
 
 	// Get collection data for property values
-	collData, _ := c.svc.store.GetCollection(c.name)
+	ctx := context.Background()
+	collData, _ := c.svc.store.GetCollection(ctx, c.name)
 	label := c.name
 	locked := false
 	created := uint64(0)
@@ -316,7 +319,8 @@ func (c *Collection) Delete() (dbus.ObjectPath, *dbus.Error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.svc.store.DeleteCollection(c.name); err != nil {
+	ctx := context.Background()
+	if err := c.svc.store.DeleteCollection(ctx, c.name); err != nil {
 		return "/", ErrObjectNotFound(err.Error())
 	}
 
@@ -335,7 +339,8 @@ func (c *Collection) SearchItems(attributes map[string]string) ([]dbus.ObjectPat
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	items, err := c.svc.store.SearchItems(c.name, attributes)
+	ctx := context.Background()
+	items, err := c.svc.store.SearchItems(ctx, c.name, attributes)
 	if err != nil {
 		return nil, ErrObjectNotFound(err.Error())
 	}
@@ -389,12 +394,14 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 		}
 	}
 
+	ctx := context.Background()
+
 	// Check for existing item with same attributes
 	// This prevents duplicates - a common practical requirement even though
 	// the spec technically allows duplicates when replace=false
 	var existingItem *store.ItemData
 	if len(attributes) > 0 {
-		existing, err := c.svc.store.SearchItems(c.name, attributes)
+		existing, err := c.svc.store.SearchItems(ctx, c.name, attributes)
 		if err == nil && len(existing) > 0 {
 			// Find exact match (all attributes must match)
 			for _, item := range existing {
@@ -415,7 +422,7 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 			if label != "" {
 				existingItem.Label = label
 			}
-			if err := c.svc.store.UpdateItem(c.name, existingItem.ID, existingItem); err != nil {
+			if err := c.svc.store.UpdateItem(ctx, c.name, existingItem.ID, existingItem); err != nil {
 				return "/", "/", ErrUnsupported(err.Error())
 			}
 			itemID = existingItem.ID
@@ -442,7 +449,7 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 		}
 		rawID := uuid.New()
 		item.ID = fmt.Sprintf("i%x", rawID[:])
-		id, err := c.svc.store.CreateItem(c.name, item)
+		id, err := c.svc.store.CreateItem(ctx, c.name, item)
 		if err != nil {
 			return "/", "/", ErrUnsupported(err.Error())
 		}
@@ -466,7 +473,8 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 }
 
 func (c *Collection) setLabel(label string) *dbus.Error {
-	if err := c.svc.store.SetCollectionLabel(c.name, label); err != nil {
+	ctx := context.Background()
+	if err := c.svc.store.SetCollectionLabel(ctx, c.name, label); err != nil {
 		return ErrUnsupported(err.Error())
 	}
 
@@ -488,7 +496,8 @@ func attributesMatch(a, b map[string]string) bool {
 }
 
 func (c *Collection) getItemPaths() []dbus.ObjectPath {
-	items, err := c.svc.store.Items(c.name)
+	ctx := context.Background()
+	items, err := c.svc.store.Items(ctx, c.name)
 	if err != nil {
 		return []dbus.ObjectPath{}
 	}
@@ -577,7 +586,8 @@ func (m *CollectionManager) All() []string {
 
 // ExportAll exports all collections from the store
 func (m *CollectionManager) ExportAll() error {
-	names, err := m.svc.store.Collections()
+	ctx := context.Background()
+	names, err := m.svc.store.Collections(ctx)
 	if err != nil {
 		log.Printf("ExportAll: failed to get collections: %v", err)
 		return err

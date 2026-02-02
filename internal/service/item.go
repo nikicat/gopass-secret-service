@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -153,7 +154,8 @@ func (i *Item) Delete() (dbus.ObjectPath, *dbus.Error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	if err := i.svc.store.DeleteItem(i.collection, i.id); err != nil {
+	ctx := context.Background()
+	if err := i.svc.store.DeleteItem(ctx, i.collection, i.id); err != nil {
 		return "/", ErrObjectNotFound(err.Error())
 	}
 
@@ -182,7 +184,8 @@ func (i *Item) GetSecret(sessionPath dbus.ObjectPath) (dbtypes.Secret, *dbus.Err
 		return dbtypes.Secret{}, ErrSessionNotFound("session not found")
 	}
 
-	item, err := i.svc.store.GetItem(i.collection, i.id)
+	ctx := context.Background()
+	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
 	if err != nil {
 		return dbtypes.Secret{}, ErrObjectNotFound(err.Error())
 	}
@@ -215,7 +218,8 @@ func (i *Item) SetSecret(secret dbtypes.Secret) *dbus.Error {
 		return ErrUnsupported(err.Error())
 	}
 
-	item, err := i.svc.store.GetItem(i.collection, i.id)
+	ctx := context.Background()
+	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
 	if err != nil {
 		return ErrObjectNotFound(err.Error())
 	}
@@ -223,7 +227,7 @@ func (i *Item) SetSecret(secret dbtypes.Secret) *dbus.Error {
 	item.Secret = plaintext
 	item.ContentType = secret.ContentType
 
-	if err := i.svc.store.UpdateItem(i.collection, i.id, item); err != nil {
+	if err := i.svc.store.UpdateItem(ctx, i.collection, i.id, item); err != nil {
 		return ErrUnsupported(err.Error())
 	}
 
@@ -234,14 +238,15 @@ func (i *Item) SetSecret(secret dbtypes.Secret) *dbus.Error {
 }
 
 func (i *Item) setAttributes(attrs map[string]string) *dbus.Error {
-	item, err := i.svc.store.GetItem(i.collection, i.id)
+	ctx := context.Background()
+	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
 	if err != nil {
 		return ErrObjectNotFound(err.Error())
 	}
 
 	item.Attributes = attrs
 
-	if err := i.svc.store.UpdateItem(i.collection, i.id, item); err != nil {
+	if err := i.svc.store.UpdateItem(ctx, i.collection, i.id, item); err != nil {
 		return ErrUnsupported(err.Error())
 	}
 
@@ -250,14 +255,15 @@ func (i *Item) setAttributes(attrs map[string]string) *dbus.Error {
 }
 
 func (i *Item) setLabel(label string) *dbus.Error {
-	item, err := i.svc.store.GetItem(i.collection, i.id)
+	ctx := context.Background()
+	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
 	if err != nil {
 		return ErrObjectNotFound(err.Error())
 	}
 
 	item.Label = label
 
-	if err := i.svc.store.UpdateItem(i.collection, i.id, item); err != nil {
+	if err := i.svc.store.UpdateItem(ctx, i.collection, i.id, item); err != nil {
 		return ErrUnsupported(err.Error())
 	}
 
@@ -266,7 +272,8 @@ func (i *Item) setLabel(label string) *dbus.Error {
 }
 
 func (i *Item) refreshProperties(props *prop.Properties) {
-	item, err := i.svc.store.GetItem(i.collection, i.id)
+	ctx := context.Background()
+	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
 	if err != nil {
 		return
 	}
@@ -349,7 +356,8 @@ func (m *ItemManager) GetItem(path dbus.ObjectPath) (*Item, bool) {
 
 // ExportAllItems exports all items for a collection
 func (m *ItemManager) ExportAllItems(collection string) error {
-	items, err := m.svc.store.Items(collection)
+	ctx := context.Background()
+	items, err := m.svc.store.Items(ctx, collection)
 	if err != nil {
 		return err
 	}

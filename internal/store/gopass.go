@@ -1,15 +1,16 @@
 package store
 
 import (
-	"bufio"
-	"bytes"
+	"context"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gopasspw/gopass/pkg/gopass"
+	"github.com/gopasspw/gopass/pkg/gopass/api"
+	"github.com/gopasspw/gopass/pkg/gopass/secrets"
 )
 
 const (
@@ -23,40 +24,41 @@ const (
 	collModifiedKey = "_ss_coll_modified"
 )
 
-// GopassStore implements Store using the gopass CLI
+// GopassStore implements Store using the gopass Go API
 type GopassStore struct {
+	store  gopass.Store
 	mapper *Mapper
 	locked map[string]bool // collection name -> locked state
 }
 
 // NewGopassStore creates a new GoPass-backed store
-func NewGopassStore(prefix string) *GopassStore {
+func NewGopassStore(ctx context.Context, prefix string) (*GopassStore, error) {
+	store, err := api.New(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize gopass: %w", err)
+	}
 	return &GopassStore{
+		store:  store,
 		mapper: NewMapper(prefix),
 		locked: make(map[string]bool),
-	}
+	}, nil
 }
 
 // Collections returns all collection names
-func (s *GopassStore) Collections() ([]string, error) {
-	out, err := s.gopass("ls", "--flat", s.mapper.prefix)
+func (s *GopassStore) Collections(ctx context.Context) ([]string, error) {
+	allPaths, err := s.store.List(ctx)
 	if err != nil {
-		// If the prefix doesn't exist, return empty list
-		if strings.Contains(err.Error(), "not found") || strings.Contains(string(out), "not found") {
-			return []string{}, nil
-		}
 		return nil, err
 	}
 
 	collections := make(map[string]bool)
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	for _, p := range allPaths {
+		// Only include paths under our prefix
+		if !strings.HasPrefix(p, s.mapper.prefix+"/") {
 			continue
 		}
 
-		coll, _, err := s.mapper.ParsePath(line)
+		coll, _, err := s.mapper.ParsePath(p)
 		if err != nil {
 			continue
 		}
@@ -78,18 +80,28 @@ func (s *GopassStore) Collections() ([]string, error) {
 }
 
 // GetCollection returns collection data by name
-func (s *GopassStore) GetCollection(name string) (*CollectionData, error) {
+func (s *GopassStore) GetCollection(ctx context.Context, name string) (*CollectionData, error) {
 	metaPath := s.mapper.CollectionMetaPath(name)
 
-	out, err := s.gopass("show", "-n", metaPath)
+	sec, err := s.store.Get(ctx, metaPath, "latest")
 	if err != nil {
 		// Check if collection exists by looking for any items
-		items, err := s.Items(name)
+		items, err := s.Items(ctx, name)
 		if err != nil || len(items) == 0 {
 			// Try listing to see if collection exists
+			allPaths, listErr := s.store.List(ctx)
+			if listErr != nil {
+				return nil, fmt.Errorf("collection not found: %s", name)
+			}
 			collPath := s.mapper.CollectionPath(name)
-			out, listErr := s.gopass("ls", "--flat", collPath)
-			if listErr != nil || len(out) == 0 {
+			found := false
+			for _, p := range allPaths {
+				if strings.HasPrefix(p, collPath+"/") {
+					found = true
+					break
+				}
+			}
+			if !found {
 				return nil, fmt.Errorf("collection not found: %s", name)
 			}
 		}
@@ -108,84 +120,85 @@ func (s *GopassStore) GetCollection(name string) (*CollectionData, error) {
 		Locked: s.locked[name],
 	}
 
-	s.parseMetadata(string(out), func(key, value string) {
+	for _, key := range sec.Keys() {
+		val, ok := sec.Get(key)
+		if !ok {
+			continue
+		}
 		switch key {
 		case collLabelKey:
-			data.Label = value
+			data.Label = val
 		case collCreatedKey:
-			if ts, err := time.Parse(time.RFC3339, value); err == nil {
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
 				data.Created = ts
 			}
 		case collModifiedKey:
-			if ts, err := time.Parse(time.RFC3339, value); err == nil {
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
 				data.Modified = ts
 			}
 		}
-	})
+	}
 
 	return data, nil
 }
 
 // CreateCollection creates a new collection
-func (s *GopassStore) CreateCollection(name, label string) error {
+func (s *GopassStore) CreateCollection(ctx context.Context, name, label string) error {
 	name = SanitizeName(name)
 	metaPath := s.mapper.CollectionMetaPath(name)
 
 	now := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("collection-metadata\n---\n%s: %s\n%s: %s\n%s: %s\n",
-		collLabelKey, label,
-		collCreatedKey, now,
-		collModifiedKey, now,
-	)
 
-	return s.gopassInsert(metaPath, content)
+	sec := secrets.New()
+	sec.SetPassword("collection-metadata")
+	sec.Set(collLabelKey, label)
+	sec.Set(collCreatedKey, now)
+	sec.Set(collModifiedKey, now)
+
+	return s.store.Set(ctx, metaPath, sec)
 }
 
 // DeleteCollection deletes a collection and all its items
-func (s *GopassStore) DeleteCollection(name string) error {
+func (s *GopassStore) DeleteCollection(ctx context.Context, name string) error {
 	collPath := s.mapper.CollectionPath(name)
-	_, err := s.gopass("rm", "-rf", collPath)
-	return err
+	return s.store.RemoveAll(ctx, collPath)
 }
 
 // SetCollectionLabel updates a collection's label
-func (s *GopassStore) SetCollectionLabel(name, label string) error {
-	existing, err := s.GetCollection(name)
+func (s *GopassStore) SetCollectionLabel(ctx context.Context, name, label string) error {
+	existing, err := s.GetCollection(ctx, name)
 	if err != nil {
 		return err
 	}
 
 	metaPath := s.mapper.CollectionMetaPath(name)
 	now := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("collection-metadata\n---\n%s: %s\n%s: %s\n%s: %s\n",
-		collLabelKey, label,
-		collCreatedKey, existing.Created.Format(time.RFC3339),
-		collModifiedKey, now,
-	)
 
-	return s.gopassInsert(metaPath, content)
+	sec := secrets.New()
+	sec.SetPassword("collection-metadata")
+	sec.Set(collLabelKey, label)
+	sec.Set(collCreatedKey, existing.Created.Format(time.RFC3339))
+	sec.Set(collModifiedKey, now)
+
+	return s.store.Set(ctx, metaPath, sec)
 }
 
 // Items returns all item IDs in a collection
-func (s *GopassStore) Items(collection string) ([]string, error) {
-	collPath := s.mapper.CollectionPath(collection)
-	out, err := s.gopass("ls", "--flat", collPath)
+func (s *GopassStore) Items(ctx context.Context, collection string) ([]string, error) {
+	allPaths, err := s.store.List(ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return []string{}, nil
-		}
 		return nil, err
 	}
 
+	collPath := s.mapper.CollectionPath(collection)
 	var items []string
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+
+	for _, p := range allPaths {
+		if !strings.HasPrefix(p, collPath+"/") {
 			continue
 		}
 
-		_, itemID, err := s.mapper.ParsePath(line)
+		_, itemID, err := s.mapper.ParsePath(p)
 		if err != nil || itemID == "" {
 			continue
 		}
@@ -202,31 +215,63 @@ func (s *GopassStore) Items(collection string) ([]string, error) {
 }
 
 // GetItem returns an item by collection and ID
-func (s *GopassStore) GetItem(collection, id string) (*ItemData, error) {
+func (s *GopassStore) GetItem(ctx context.Context, collection, id string) (*ItemData, error) {
 	itemPath := s.mapper.ItemPath(collection, id)
 
-	out, err := s.gopass("show", "-n", itemPath)
+	sec, err := s.store.Get(ctx, itemPath, "latest")
 	if err != nil {
 		return nil, fmt.Errorf("item not found: %s/%s", collection, id)
 	}
 
-	return s.parseItem(id, string(out))
+	item := &ItemData{
+		ID:          id,
+		Secret:      []byte(sec.Password()),
+		ContentType: "text/plain",
+		Attributes:  make(map[string]string),
+	}
+
+	for _, key := range sec.Keys() {
+		val, ok := sec.Get(key)
+		if !ok {
+			continue
+		}
+
+		switch key {
+		case labelKey:
+			item.Label = val
+		case createdKey:
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
+				item.Created = ts
+			}
+		case modifiedKey:
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
+				item.Modified = ts
+			}
+		case contentTypeKey:
+			item.ContentType = val
+		default:
+			// Regular attribute (skip internal metadata)
+			if !strings.HasPrefix(key, metaPrefix) {
+				item.Attributes[key] = val
+			}
+		}
+	}
+
+	return item, nil
 }
 
 // CreateItem creates a new item in a collection
-func (s *GopassStore) CreateItem(collection string, item *ItemData) (string, error) {
+func (s *GopassStore) CreateItem(ctx context.Context, collection string, item *ItemData) (string, error) {
 	// Generate UUID if not provided
 	if item.ID == "" {
 		item.ID = uuid.New().String()
 	}
 
-	itemPath := s.mapper.ItemPath(collection, item.ID)
-
 	// Ensure collection exists
-	_, err := s.GetCollection(collection)
+	_, err := s.GetCollection(ctx, collection)
 	if err != nil {
 		// Create collection with default label
-		if err := s.CreateCollection(collection, collection); err != nil {
+		if err := s.CreateCollection(ctx, collection, collection); err != nil {
 			return "", fmt.Errorf("failed to create collection: %w", err)
 		}
 	}
@@ -241,8 +286,25 @@ func (s *GopassStore) CreateItem(collection string, item *ItemData) (string, err
 		item.ContentType = "text/plain"
 	}
 
-	content := s.formatItem(item)
-	if err := s.gopassInsert(itemPath, content); err != nil {
+	sec := secrets.New()
+	sec.SetPassword(string(item.Secret))
+	sec.Set(labelKey, item.Label)
+	sec.Set(createdKey, item.Created.Format(time.RFC3339))
+	sec.Set(modifiedKey, item.Modified.Format(time.RFC3339))
+	sec.Set(contentTypeKey, item.ContentType)
+
+	// Add user attributes (sorted for consistency)
+	keys := make([]string, 0, len(item.Attributes))
+	for k := range item.Attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sec.Set(k, item.Attributes[k])
+	}
+
+	itemPath := s.mapper.ItemPath(collection, item.ID)
+	if err := s.store.Set(ctx, itemPath, sec); err != nil {
 		return "", err
 	}
 
@@ -250,8 +312,8 @@ func (s *GopassStore) CreateItem(collection string, item *ItemData) (string, err
 }
 
 // UpdateItem updates an existing item
-func (s *GopassStore) UpdateItem(collection, id string, item *ItemData) error {
-	existing, err := s.GetItem(collection, id)
+func (s *GopassStore) UpdateItem(ctx context.Context, collection, id string, item *ItemData) error {
+	existing, err := s.GetItem(ctx, collection, id)
 	if err != nil {
 		return err
 	}
@@ -265,28 +327,43 @@ func (s *GopassStore) UpdateItem(collection, id string, item *ItemData) error {
 		item.ContentType = existing.ContentType
 	}
 
+	sec := secrets.New()
+	sec.SetPassword(string(item.Secret))
+	sec.Set(labelKey, item.Label)
+	sec.Set(createdKey, item.Created.Format(time.RFC3339))
+	sec.Set(modifiedKey, item.Modified.Format(time.RFC3339))
+	sec.Set(contentTypeKey, item.ContentType)
+
+	// Add user attributes (sorted for consistency)
+	keys := make([]string, 0, len(item.Attributes))
+	for k := range item.Attributes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		sec.Set(k, item.Attributes[k])
+	}
+
 	itemPath := s.mapper.ItemPath(collection, id)
-	content := s.formatItem(item)
-	return s.gopassInsert(itemPath, content)
+	return s.store.Set(ctx, itemPath, sec)
 }
 
 // DeleteItem deletes an item
-func (s *GopassStore) DeleteItem(collection, id string) error {
+func (s *GopassStore) DeleteItem(ctx context.Context, collection, id string) error {
 	itemPath := s.mapper.ItemPath(collection, id)
-	_, err := s.gopass("rm", "-f", itemPath)
-	return err
+	return s.store.Remove(ctx, itemPath)
 }
 
 // SearchItems searches for items matching the given attributes
-func (s *GopassStore) SearchItems(collection string, attributes map[string]string) ([]*ItemData, error) {
-	items, err := s.Items(collection)
+func (s *GopassStore) SearchItems(ctx context.Context, collection string, attributes map[string]string) ([]*ItemData, error) {
+	items, err := s.Items(ctx, collection)
 	if err != nil {
 		return nil, err
 	}
 
 	var results []*ItemData
 	for _, id := range items {
-		item, err := s.GetItem(collection, id)
+		item, err := s.GetItem(ctx, collection, id)
 		if err != nil {
 			continue
 		}
@@ -300,15 +377,15 @@ func (s *GopassStore) SearchItems(collection string, attributes map[string]strin
 }
 
 // SearchAllItems searches across all collections
-func (s *GopassStore) SearchAllItems(attributes map[string]string) (map[string][]*ItemData, error) {
-	collections, err := s.Collections()
+func (s *GopassStore) SearchAllItems(ctx context.Context, attributes map[string]string) (map[string][]*ItemData, error) {
+	collections, err := s.Collections(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	results := make(map[string][]*ItemData)
 	for _, coll := range collections {
-		items, err := s.SearchItems(coll, attributes)
+		items, err := s.SearchItems(ctx, coll, attributes)
 		if err != nil {
 			continue
 		}
@@ -321,21 +398,21 @@ func (s *GopassStore) SearchAllItems(attributes map[string]string) (map[string][
 }
 
 // LockCollection locks a collection
-func (s *GopassStore) LockCollection(name string) error {
+func (s *GopassStore) LockCollection(ctx context.Context, name string) error {
 	s.locked[name] = true
 	return nil
 }
 
 // UnlockCollection unlocks a collection
-func (s *GopassStore) UnlockCollection(name string) error {
+func (s *GopassStore) UnlockCollection(ctx context.Context, name string) error {
 	s.locked[name] = false
 	return nil
 }
 
 // GetAlias returns the collection name for an alias
-func (s *GopassStore) GetAlias(alias string) (string, error) {
+func (s *GopassStore) GetAlias(ctx context.Context, alias string) (string, error) {
 	aliasPath := s.mapper.AliasesPath()
-	out, err := s.gopass("show", "-n", aliasPath)
+	sec, err := s.store.Get(ctx, aliasPath, "latest")
 	if err != nil {
 		// Handle default alias specially
 		if alias == "default" {
@@ -344,17 +421,8 @@ func (s *GopassStore) GetAlias(alias string) (string, error) {
 		return "", fmt.Errorf("alias not found: %s", alias)
 	}
 
-	var result string
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, alias+":") {
-			result = strings.TrimSpace(strings.TrimPrefix(line, alias+":"))
-			break
-		}
-	}
-
-	if result == "" {
+	result, ok := sec.Get(alias)
+	if !ok || result == "" {
 		if alias == "default" {
 			return "default", nil
 		}
@@ -365,22 +433,16 @@ func (s *GopassStore) GetAlias(alias string) (string, error) {
 }
 
 // SetAlias sets an alias for a collection
-func (s *GopassStore) SetAlias(alias, collection string) error {
+func (s *GopassStore) SetAlias(ctx context.Context, alias, collection string) error {
 	aliasPath := s.mapper.AliasesPath()
 
 	// Get existing aliases
 	aliases := make(map[string]string)
-	out, err := s.gopass("show", "-n", aliasPath)
+	sec, err := s.store.Get(ctx, aliasPath, "latest")
 	if err == nil {
-		scanner := bufio.NewScanner(bytes.NewReader(out))
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || line == "---" || strings.HasPrefix(line, "_") {
-				continue
-			}
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				aliases[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		for _, key := range sec.Keys() {
+			if val, ok := sec.Get(key); ok {
+				aliases[key] = val
 			}
 		}
 	}
@@ -393,146 +455,18 @@ func (s *GopassStore) SetAlias(alias, collection string) error {
 	}
 
 	// Write back
-	var content strings.Builder
-	content.WriteString("aliases\n---\n")
+	newSec := secrets.New()
+	newSec.SetPassword("aliases")
 	for k, v := range aliases {
-		content.WriteString(fmt.Sprintf("%s: %s\n", k, v))
+		newSec.Set(k, v)
 	}
 
-	return s.gopassInsert(aliasPath, content.String())
+	return s.store.Set(ctx, aliasPath, newSec)
 }
 
 // Close closes the store
-func (s *GopassStore) Close() error {
-	return nil
-}
-
-// Helper methods
-
-func (s *GopassStore) gopass(args ...string) ([]byte, error) {
-	cmd := exec.Command("gopass", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("gopass %s failed: %w: %s", strings.Join(args, " "), err, string(out))
-	}
-	return out, nil
-}
-
-func (s *GopassStore) gopassInsert(path, content string) error {
-	cmd := exec.Command("gopass", "insert", "-f", path)
-	cmd.Stdin = strings.NewReader(content)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gopass insert failed: %w: %s", err, string(out))
-	}
-	return nil
-}
-
-func (s *GopassStore) parseMetadata(content string, handler func(key, value string)) {
-	lines := strings.Split(content, "\n")
-	inMeta := false
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "---" {
-			inMeta = true
-			continue
-		}
-		if !inMeta {
-			continue
-		}
-
-		// Split on ": " to handle keys with colons (e.g., "xdg:schema")
-		parts := strings.SplitN(line, ": ", 2)
-		if len(parts) == 2 {
-			key := parts[0]
-			value := parts[1]
-			handler(key, value)
-		}
-	}
-}
-
-func (s *GopassStore) parseItem(id, content string) (*ItemData, error) {
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 {
-		return nil, fmt.Errorf("empty item content")
-	}
-
-	item := &ItemData{
-		ID:          id,
-		Secret:      []byte(lines[0]),
-		ContentType: "text/plain",
-		Attributes:  make(map[string]string),
-	}
-
-	inMeta := false
-	for _, line := range lines[1:] {
-		line = strings.TrimSpace(line)
-		if line == "---" {
-			inMeta = true
-			continue
-		}
-		if !inMeta {
-			continue
-		}
-
-		// Split on ": " to handle keys with colons (e.g., "xdg:schema")
-		parts := strings.SplitN(line, ": ", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := parts[0]
-		value := parts[1]
-
-		switch key {
-		case labelKey:
-			item.Label = value
-		case createdKey:
-			if ts, err := time.Parse(time.RFC3339, value); err == nil {
-				item.Created = ts
-			}
-		case modifiedKey:
-			if ts, err := time.Parse(time.RFC3339, value); err == nil {
-				item.Modified = ts
-			}
-		case contentTypeKey:
-			item.ContentType = value
-		default:
-			// Regular attribute
-			if !strings.HasPrefix(key, metaPrefix) {
-				item.Attributes[key] = value
-			}
-		}
-	}
-
-	return item, nil
-}
-
-func (s *GopassStore) formatItem(item *ItemData) string {
-	var content strings.Builder
-
-	// First line is the secret
-	content.Write(item.Secret)
-	content.WriteString("\n---\n")
-
-	// Metadata
-	content.WriteString(fmt.Sprintf("%s: %s\n", labelKey, item.Label))
-	content.WriteString(fmt.Sprintf("%s: %s\n", createdKey, item.Created.Format(time.RFC3339)))
-	content.WriteString(fmt.Sprintf("%s: %s\n", modifiedKey, item.Modified.Format(time.RFC3339)))
-	content.WriteString(fmt.Sprintf("%s: %s\n", contentTypeKey, item.ContentType))
-
-	// User attributes
-	keys := make([]string, 0, len(item.Attributes))
-	for k := range item.Attributes {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		content.WriteString(fmt.Sprintf("%s: %s\n", k, item.Attributes[k]))
-	}
-
-	return content.String()
+func (s *GopassStore) Close(ctx context.Context) error {
+	return s.store.Close(ctx)
 }
 
 func matchesAttributes(item *ItemData, attrs map[string]string) bool {

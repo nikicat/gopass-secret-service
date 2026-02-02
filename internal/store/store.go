@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"time"
 )
 
@@ -52,53 +53,53 @@ type CollectionData struct {
 // Store is the interface for secret storage backends
 type Store interface {
 	// Collections returns all collection names
-	Collections() ([]string, error)
+	Collections(ctx context.Context) ([]string, error)
 
 	// GetCollection returns collection data by name
-	GetCollection(name string) (*CollectionData, error)
+	GetCollection(ctx context.Context, name string) (*CollectionData, error)
 
 	// CreateCollection creates a new collection
-	CreateCollection(name, label string) error
+	CreateCollection(ctx context.Context, name, label string) error
 
 	// DeleteCollection deletes a collection and all its items
-	DeleteCollection(name string) error
+	DeleteCollection(ctx context.Context, name string) error
 
 	// SetCollectionLabel updates a collection's label
-	SetCollectionLabel(name, label string) error
+	SetCollectionLabel(ctx context.Context, name, label string) error
 
 	// Items returns all item IDs in a collection
-	Items(collection string) ([]string, error)
+	Items(ctx context.Context, collection string) ([]string, error)
 
 	// GetItem returns an item by collection and ID
-	GetItem(collection, id string) (*ItemData, error)
+	GetItem(ctx context.Context, collection, id string) (*ItemData, error)
 
 	// CreateItem creates a new item in a collection
-	CreateItem(collection string, item *ItemData) (string, error)
+	CreateItem(ctx context.Context, collection string, item *ItemData) (string, error)
 
 	// UpdateItem updates an existing item
-	UpdateItem(collection, id string, item *ItemData) error
+	UpdateItem(ctx context.Context, collection, id string, item *ItemData) error
 
 	// DeleteItem deletes an item
-	DeleteItem(collection, id string) error
+	DeleteItem(ctx context.Context, collection, id string) error
 
 	// SearchItems searches for items matching the given attributes
-	SearchItems(collection string, attributes map[string]string) ([]*ItemData, error)
+	SearchItems(ctx context.Context, collection string, attributes map[string]string) ([]*ItemData, error)
 
 	// SearchAllItems searches across all collections
-	SearchAllItems(attributes map[string]string) (map[string][]*ItemData, error)
+	SearchAllItems(ctx context.Context, attributes map[string]string) (map[string][]*ItemData, error)
 
 	// Lock locks a collection
-	LockCollection(name string) error
+	LockCollection(ctx context.Context, name string) error
 
 	// Unlock unlocks a collection
-	UnlockCollection(name string) error
+	UnlockCollection(ctx context.Context, name string) error
 
 	// GetAlias returns the collection name for an alias
-	GetAlias(alias string) (string, error)
+	GetAlias(ctx context.Context, alias string) (string, error)
 
 	// SetAlias sets an alias for a collection
-	SetAlias(alias, collection string) error
+	SetAlias(ctx context.Context, alias, collection string) error
 
 	// Close closes the store
-	Close() error
+	Close(ctx context.Context) error
 }

@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -27,7 +29,7 @@ type Service struct {
 }
 
 // New creates a new Secret Service
-func New(cfg *config.Config) (*Service, error) {
+func New(ctx context.Context, cfg *config.Config) (*Service, error) {
 	// Connect to session bus
 	conn, err := dbus.SessionBus()
 	if err != nil {
@@ -35,7 +37,11 @@ func New(cfg *config.Config) (*Service, error) {
 	}
 
 	// Create the store
-	gopassStore := store.NewGopassStore(cfg.Prefix)
+	gopassStore, err := store.NewGopassStore(ctx, cfg.Prefix)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to create gopass store: %w", err)
+	}
 
 	svc := &Service{
 		conn:  conn,
@@ -121,6 +127,13 @@ func (s *Service) Stop() error {
 	s.sessions.CloseAll()
 	s.prompts.CloseAll()
 
+	// Close the store with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.Close(ctx); err != nil {
+		log.Printf("Warning: failed to close store: %v", err)
+	}
+
 	if _, err := s.conn.ReleaseName(dbtypes.ServiceName); err != nil {
 		return err
 	}
@@ -176,7 +189,8 @@ func (s *Service) CreateCollection(properties map[string]dbus.Variant, alias str
 	}
 
 	// Create collection in store
-	if err := s.store.CreateCollection(name, label); err != nil {
+	ctx := context.Background()
+	if err := s.store.CreateCollection(ctx, name, label); err != nil {
 		return "/", "/", ErrUnsupported(err.Error())
 	}
 
@@ -188,7 +202,7 @@ func (s *Service) CreateCollection(properties map[string]dbus.Variant, alias str
 
 	// Set alias if provided
 	if alias != "" {
-		if err := s.store.SetAlias(alias, name); err != nil {
+		if err := s.store.SetAlias(ctx, alias, name); err != nil {
 			log.Printf("Warning: failed to set alias %s: %v", alias, err)
 		}
 	}
@@ -207,14 +221,15 @@ func (s *Service) SearchItems(attributes map[string]string) ([]dbus.ObjectPath, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	results, err := s.store.SearchAllItems(attributes)
+	ctx := context.Background()
+	results, err := s.store.SearchAllItems(ctx, attributes)
 	if err != nil {
 		return nil, nil, ErrObjectNotFound(err.Error())
 	}
 
 	var unlocked, locked []dbus.ObjectPath
 	for collName, items := range results {
-		collData, _ := s.store.GetCollection(collName)
+		collData, _ := s.store.GetCollection(ctx, collName)
 		isLocked := collData != nil && collData.Locked
 
 		for _, item := range items {
@@ -235,6 +250,7 @@ func (s *Service) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Obj
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ctx := context.Background()
 	var unlocked []dbus.ObjectPath
 
 	for _, path := range objects {
@@ -243,7 +259,7 @@ func (s *Service) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Obj
 			if err != nil {
 				continue
 			}
-			if err := s.store.UnlockCollection(name); err != nil {
+			if err := s.store.UnlockCollection(ctx, name); err != nil {
 				continue
 			}
 			unlocked = append(unlocked, path)
@@ -259,6 +275,7 @@ func (s *Service) Lock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Objec
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ctx := context.Background()
 	var locked []dbus.ObjectPath
 
 	for _, path := range objects {
@@ -267,7 +284,7 @@ func (s *Service) Lock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Objec
 			if err != nil {
 				continue
 			}
-			if err := s.store.LockCollection(name); err != nil {
+			if err := s.store.LockCollection(ctx, name); err != nil {
 				continue
 			}
 			locked = append(locked, path)
@@ -288,6 +305,7 @@ func (s *Service) GetSecrets(items []dbus.ObjectPath, session dbus.ObjectPath) (
 		return nil, ErrSessionNotFound("session not found")
 	}
 
+	ctx := context.Background()
 	secrets := make(map[dbus.ObjectPath]dbtypes.Secret)
 
 	for _, path := range items {
@@ -296,7 +314,7 @@ func (s *Service) GetSecrets(items []dbus.ObjectPath, session dbus.ObjectPath) (
 			continue
 		}
 
-		item, err := s.store.GetItem(collection, id)
+		item, err := s.store.GetItem(ctx, collection, id)
 		if err != nil {
 			continue
 		}
@@ -322,7 +340,8 @@ func (s *Service) ReadAlias(name string) (dbus.ObjectPath, *dbus.Error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	collName, err := s.store.GetAlias(name)
+	ctx := context.Background()
+	collName, err := s.store.GetAlias(ctx, name)
 	if err != nil {
 		return "/", nil // Return "/" for unknown alias (not an error per spec)
 	}
@@ -335,9 +354,10 @@ func (s *Service) SetAlias(name string, collection dbus.ObjectPath) *dbus.Error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ctx := context.Background()
 	if collection == "/" {
 		// Remove alias
-		if err := s.store.SetAlias(name, ""); err != nil {
+		if err := s.store.SetAlias(ctx, name, ""); err != nil {
 			return ErrUnsupported(err.Error())
 		}
 		return nil
@@ -348,7 +368,7 @@ func (s *Service) SetAlias(name string, collection dbus.ObjectPath) *dbus.Error 
 		return ErrObjectNotFound(err.Error())
 	}
 
-	if err := s.store.SetAlias(name, collName); err != nil {
+	if err := s.store.SetAlias(ctx, name, collName); err != nil {
 		return ErrUnsupported(err.Error())
 	}
 
@@ -391,11 +411,13 @@ func (s *Service) refreshCollections() {
 }
 
 func (s *Service) ensureDefaultCollection() error {
+	ctx := context.Background()
+
 	// Check if default collection exists
-	collName, err := s.store.GetAlias("default")
+	collName, err := s.store.GetAlias(ctx, "default")
 	if err == nil {
 		// Check if the collection actually exists
-		if _, err := s.store.GetCollection(collName); err == nil {
+		if _, err := s.store.GetCollection(ctx, collName); err == nil {
 			// Export alias for existing collection
 			coll, ok := s.collections.Get(collName)
 			if !ok {
@@ -414,12 +436,12 @@ func (s *Service) ensureDefaultCollection() error {
 
 	// Create default collection
 	defaultName := s.cfg.DefaultCollection
-	if err := s.store.CreateCollection(defaultName, "Default"); err != nil {
+	if err := s.store.CreateCollection(ctx, defaultName, "Default"); err != nil {
 		return err
 	}
 
 	// Set alias
-	if err := s.store.SetAlias("default", defaultName); err != nil {
+	if err := s.store.SetAlias(ctx, "default", defaultName); err != nil {
 		return err
 	}
 

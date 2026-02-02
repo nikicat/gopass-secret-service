@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -40,7 +41,8 @@ func main() {
 	log.Printf("Default collection: %s", cfg.DefaultCollection)
 
 	// Create and start the service
-	svc, err := service.New(cfg)
+	ctx := context.Background()
+	svc, err := service.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create service: %v", err)
 	}
