@@ -30,10 +30,28 @@ type Service struct {
 
 // New creates a new Secret Service
 func New(ctx context.Context, cfg *config.Config) (*Service, error) {
-	// Connect to session bus
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
+	// Connect to D-Bus
+	var conn *dbus.Conn
+	var err error
+	if cfg.BusAddress != "" {
+		conn, err = dbus.Dial(cfg.BusAddress)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to bus %s: %w", cfg.BusAddress, err)
+		}
+		if err = conn.Auth(nil); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to authenticate on bus: %w", err)
+		}
+		if err = conn.Hello(); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to send Hello on bus: %w", err)
+		}
+		log.Printf("Connected to custom bus: %s", cfg.BusAddress)
+	} else {
+		conn, err = dbus.SessionBus()
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to session bus: %w", err)
+		}
 	}
 
 	// Create the store

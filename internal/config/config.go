@@ -29,6 +29,11 @@ type Config struct {
 	// Replace indicates whether to replace an existing secret-service provider
 	Replace bool `yaml:"replace"`
 
+	// BusAddress is a custom D-Bus socket address to connect to instead of the session bus.
+	// When set, DBUS_SESSION_BUS_ADDRESS is left unchanged (useful for private bus setups
+	// where child processes like gpg-agent/pinentry still need the real session bus).
+	BusAddress string `yaml:"bus_address"`
+
 	// Verbose enables verbose logging
 	Verbose bool `yaml:"-"`
 
@@ -72,6 +77,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(debug, "debug", false, "Enable debug logging")
 	replace := flag.Bool("r", false, "Replace existing secret-service provider")
 	flag.BoolVar(replace, "replace", false, "Replace existing secret-service provider")
+	busAddress := flag.String("bus-address", "", "Custom D-Bus socket address (unix:path=...)")
 	version := flag.Bool("version", false, "Print version and exit")
 	help := flag.Bool("h", false, "Show help message")
 	flag.BoolVar(help, "help", false, "Show help message")
@@ -118,6 +124,9 @@ func Load() (*Config, error) {
 	if *prefix != "" {
 		cfg.Prefix = *prefix
 	}
+	if *busAddress != "" {
+		cfg.BusAddress = *busAddress
+	}
 
 	// Expand ~ in paths
 	cfg.StorePath = expandPath(cfg.StorePath)
@@ -160,6 +169,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("GOPASS_SECRET_SERVICE_REPLACE"); v == "true" || v == "1" {
 		c.Replace = true
 	}
+	if v := os.Getenv("GOPASS_SECRET_SERVICE_BUS_ADDRESS"); v != "" {
+		c.BusAddress = v
+	}
 }
 
 func expandPath(path string) string {
@@ -186,6 +198,7 @@ Options:
   -v, --verbose            Enable verbose logging
   -d, --debug              Enable debug logging
   -r, --replace            Replace existing secret-service provider
+      --bus-address ADDR   Custom D-Bus socket address (unix:path=...)
       --version            Print version and exit
   -h, --help               Show help message
 
@@ -196,5 +209,6 @@ Environment variables:
   GOPASS_SECRET_SERVICE_DEFAULT_COLLECTION Default collection name
   GOPASS_SECRET_SERVICE_LOG_LEVEL          Log level (debug, info, warn, error)
   GOPASS_SECRET_SERVICE_LOG_FILE           Log file path
-  GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)`)
+  GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)
+  GOPASS_SECRET_SERVICE_BUS_ADDRESS        Custom D-Bus socket address`)
 }
