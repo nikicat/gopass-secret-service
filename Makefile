@@ -8,8 +8,10 @@ LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
 PREFIX := $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 DBUS_SERVICE_DIR := $(HOME)/.local/share/dbus-1/services
+SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
+SERVICE_UNIT := gopass-secret-service.service
 
-.PHONY: all build clean install install-user install-system uninstall test lint fmt run config-dir
+.PHONY: all build clean install install-user install-system install-service uninstall test lint fmt run config-dir
 
 all: build
 
@@ -52,10 +54,26 @@ install-system: build
 	@echo "  Binary: /usr/local/bin/$(BINARY)"
 	@echo "  D-Bus service: $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service"
 
+# Install as a systemd user service
+install-service: install
+	@mkdir -p $(SYSTEMD_USER_DIR)
+	@printf '[Unit]\nDescription=GoPass Secret Service - D-Bus Secret Service backed by GoPass\n\n[Service]\nType=simple\nExecStart=$(BINDIR)/$(BINARY)\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n' > $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT)
+	systemctl --user daemon-reload
+	systemctl --user enable $(SERVICE_UNIT)
+	@echo ""
+	@echo "Systemd service installed and enabled."
+	@echo "  Unit: $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT)"
+	@echo "  Start with: systemctl --user start $(SERVICE_UNIT)"
+
 uninstall:
 	rm -f $(BINDIR)/$(BINARY)
 	rm -f /usr/local/bin/$(BINARY)
 	rm -f $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service
+	@if [ -f $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT) ]; then \
+		systemctl --user disable --now $(SERVICE_UNIT) 2>/dev/null || true; \
+		rm -f $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT); \
+		systemctl --user daemon-reload; \
+	fi
 	@echo "Uninstalled $(BINARY)"
 
 test:
@@ -88,7 +106,8 @@ help:
 	@echo "  build            Build the binary"
 	@echo "  install          Install to ~/.local/bin (no root required)"
 	@echo "  install-system   Install to /usr/local/bin (requires root)"
-	@echo "  uninstall        Remove installed files"
+	@echo "  install-service  Install + enable as systemd user service"
+	@echo "  uninstall        Remove installed files and service"
 	@echo "  test             Run unit tests"
 	@echo "  test-integration Run integration tests"
 	@echo "  run              Build and run with debug logging"
