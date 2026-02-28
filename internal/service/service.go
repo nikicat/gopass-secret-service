@@ -389,12 +389,17 @@ func (s *Service) SetAlias(name string, collection dbus.ObjectPath) *dbus.Error 
 	return nil
 }
 
-// resolveCollectionName extracts a collection name from either a collection path
-// (/org/freedesktop/secrets/collection/NAME) or an alias path
-// (/org/freedesktop/secrets/aliases/ALIAS), resolving aliases via the store.
+// resolveCollectionName extracts a collection name from a collection path
+// (/org/freedesktop/secrets/collection/NAME), an alias path
+// (/org/freedesktop/secrets/aliases/ALIAS), or an item path
+// (/org/freedesktop/secrets/collection/NAME/ITEM), resolving to the parent collection.
 func (s *Service) resolveCollectionName(ctx context.Context, path dbus.ObjectPath) (string, error) {
 	if dbtypes.IsCollectionPath(path) {
 		return dbtypes.ParseCollectionPath(path)
+	}
+	if dbtypes.IsItemPath(path) {
+		coll, _, err := dbtypes.ParseItemPath(path)
+		return coll, err
 	}
 	if dbtypes.IsAliasPath(path) {
 		alias, err := dbtypes.ParseAliasPath(path)
@@ -403,7 +408,7 @@ func (s *Service) resolveCollectionName(ctx context.Context, path dbus.ObjectPat
 		}
 		return s.store.GetAlias(ctx, alias)
 	}
-	return "", fmt.Errorf("not a collection or alias path: %s", path)
+	return "", fmt.Errorf("not a collection, item, or alias path: %s", path)
 }
 
 // Signal emission helpers

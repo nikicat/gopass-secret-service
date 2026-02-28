@@ -379,6 +379,32 @@ func TestLock_AliasPath(t *testing.T) {
 	}
 }
 
+func TestUnlock_ItemPath(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.mu.Unlock()
+
+	// Unlock using item path (what gh does after CreateItem)
+	itemPath := dbtypes.ItemPath("default", "i52f9c2333e2246e1bd6e533333f68788")
+	unlocked, prompt, dbusErr := svc.Unlock([]dbus.ObjectPath{itemPath})
+	if dbusErr != nil {
+		t.Fatalf("Unlock: %v", dbusErr)
+	}
+	if prompt != "/" {
+		t.Fatalf("Unlock returned prompt %s, want /", prompt)
+	}
+	if len(unlocked) != 1 {
+		t.Fatalf("Unlock returned %d unlocked objects, want 1", len(unlocked))
+	}
+	if unlocked[0] != itemPath {
+		t.Errorf("Unlock returned %s, want %s", unlocked[0], itemPath)
+	}
+}
+
+
 func containsPath(paths []dbus.ObjectPath, target dbus.ObjectPath) bool {
 	for _, p := range paths {
 		if p == target {
