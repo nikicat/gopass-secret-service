@@ -304,6 +304,81 @@ func TestDeleteCollection_UpdatesCollectionsProperty(t *testing.T) {
 	}
 }
 
+func TestUnlock_AliasPath(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	// Set up alias "default" -> "login"
+	ms.mu.Lock()
+	ms.aliases["default"] = "login"
+	ms.collections["login"] = &store.CollectionData{Name: "login", Label: "Login"}
+	ms.mu.Unlock()
+
+	// Unlock using alias path (what go-keyring sends)
+	aliasPath := dbtypes.AliasPath("default")
+	unlocked, prompt, dbusErr := svc.Unlock([]dbus.ObjectPath{aliasPath})
+	if dbusErr != nil {
+		t.Fatalf("Unlock: %v", dbusErr)
+	}
+	if prompt != "/" {
+		t.Fatalf("Unlock returned prompt %s, want /", prompt)
+	}
+	if len(unlocked) != 1 {
+		t.Fatalf("Unlock returned %d unlocked objects, want 1", len(unlocked))
+	}
+	if unlocked[0] != aliasPath {
+		t.Errorf("Unlock returned %s, want %s", unlocked[0], aliasPath)
+	}
+}
+
+func TestUnlock_CollectionPath(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	ms.mu.Lock()
+	ms.collections["login"] = &store.CollectionData{Name: "login", Label: "Login"}
+	ms.mu.Unlock()
+
+	// Unlock using direct collection path
+	collPath := dbtypes.CollectionPath("login")
+	unlocked, _, dbusErr := svc.Unlock([]dbus.ObjectPath{collPath})
+	if dbusErr != nil {
+		t.Fatalf("Unlock: %v", dbusErr)
+	}
+	if len(unlocked) != 1 {
+		t.Fatalf("Unlock returned %d unlocked objects, want 1", len(unlocked))
+	}
+	if unlocked[0] != collPath {
+		t.Errorf("Unlock returned %s, want %s", unlocked[0], collPath)
+	}
+}
+
+func TestLock_AliasPath(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	ms.mu.Lock()
+	ms.aliases["default"] = "login"
+	ms.collections["login"] = &store.CollectionData{Name: "login", Label: "Login"}
+	ms.mu.Unlock()
+
+	// Lock using alias path
+	aliasPath := dbtypes.AliasPath("default")
+	locked, prompt, dbusErr := svc.Lock([]dbus.ObjectPath{aliasPath})
+	if dbusErr != nil {
+		t.Fatalf("Lock: %v", dbusErr)
+	}
+	if prompt != "/" {
+		t.Fatalf("Lock returned prompt %s, want /", prompt)
+	}
+	if len(locked) != 1 {
+		t.Fatalf("Lock returned %d locked objects, want 1", len(locked))
+	}
+	if locked[0] != aliasPath {
+		t.Errorf("Lock returned %s, want %s", locked[0], aliasPath)
+	}
+}
+
 func containsPath(paths []dbus.ObjectPath, target dbus.ObjectPath) bool {
 	for _, p := range paths {
 		if p == target {

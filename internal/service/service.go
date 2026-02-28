@@ -272,16 +272,14 @@ func (s *Service) Unlock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Obj
 	var unlocked []dbus.ObjectPath
 
 	for _, path := range objects {
-		if dbtypes.IsCollectionPath(path) {
-			name, err := dbtypes.ParseCollectionPath(path)
-			if err != nil {
-				continue
-			}
-			if err := s.store.UnlockCollection(ctx, name); err != nil {
-				continue
-			}
-			unlocked = append(unlocked, path)
+		name, err := s.resolveCollectionName(ctx, path)
+		if err != nil {
+			continue
 		}
+		if err := s.store.UnlockCollection(ctx, name); err != nil {
+			continue
+		}
+		unlocked = append(unlocked, path)
 	}
 
 	// No prompt needed for this implementation
@@ -297,16 +295,14 @@ func (s *Service) Lock(objects []dbus.ObjectPath) ([]dbus.ObjectPath, dbus.Objec
 	var locked []dbus.ObjectPath
 
 	for _, path := range objects {
-		if dbtypes.IsCollectionPath(path) {
-			name, err := dbtypes.ParseCollectionPath(path)
-			if err != nil {
-				continue
-			}
-			if err := s.store.LockCollection(ctx, name); err != nil {
-				continue
-			}
-			locked = append(locked, path)
+		name, err := s.resolveCollectionName(ctx, path)
+		if err != nil {
+			continue
 		}
+		if err := s.store.LockCollection(ctx, name); err != nil {
+			continue
+		}
+		locked = append(locked, path)
 	}
 
 	// No prompt needed for this implementation
@@ -391,6 +387,23 @@ func (s *Service) SetAlias(name string, collection dbus.ObjectPath) *dbus.Error 
 	}
 
 	return nil
+}
+
+// resolveCollectionName extracts a collection name from either a collection path
+// (/org/freedesktop/secrets/collection/NAME) or an alias path
+// (/org/freedesktop/secrets/aliases/ALIAS), resolving aliases via the store.
+func (s *Service) resolveCollectionName(ctx context.Context, path dbus.ObjectPath) (string, error) {
+	if dbtypes.IsCollectionPath(path) {
+		return dbtypes.ParseCollectionPath(path)
+	}
+	if dbtypes.IsAliasPath(path) {
+		alias, err := dbtypes.ParseAliasPath(path)
+		if err != nil {
+			return "", err
+		}
+		return s.store.GetAlias(ctx, alias)
+	}
+	return "", fmt.Errorf("not a collection or alias path: %s", path)
 }
 
 // Signal emission helpers
