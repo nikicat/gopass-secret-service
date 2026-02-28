@@ -8,10 +8,8 @@ LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
 PREFIX := $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 DBUS_SERVICE_DIR := $(HOME)/.local/share/dbus-1/services
-SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
-SERVICE_UNIT := gopass-secret-service.service
 
-.PHONY: all build clean install install-user install-system install-service uninstall test lint fmt run config-dir
+.PHONY: all build clean install install-user install-system uninstall test lint fmt run
 
 all: build
 
@@ -32,6 +30,9 @@ install: build
 	@echo "Installation complete!"
 	@echo "  Binary: $(BINDIR)/$(BINARY)"
 	@echo "  D-Bus service: $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service"
+	@echo ""
+	@echo "To install as a systemd service, run:"
+	@echo "  $(BINDIR)/$(BINARY) install"
 	@echo ""
 	@if ! echo "$$PATH" | grep -q "$(BINDIR)"; then \
 		echo "NOTE: $(BINDIR) is not in your PATH."; \
@@ -54,27 +55,12 @@ install-system: build
 	@echo "  Binary: /usr/local/bin/$(BINARY)"
 	@echo "  D-Bus service: $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service"
 
-# Install as a systemd user service
-install-service: install
-	@mkdir -p $(SYSTEMD_USER_DIR)
-	@printf '[Unit]\nDescription=GoPass Secret Service - D-Bus Secret Service backed by GoPass\n\n[Service]\nType=simple\nExecStart=$(BINDIR)/$(BINARY)\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n' > $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT)
-	systemctl --user daemon-reload
-	systemctl --user enable $(SERVICE_UNIT)
-	@echo ""
-	@echo "Systemd service installed and enabled."
-	@echo "  Unit: $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT)"
-	@echo "  Start with: systemctl --user start $(SERVICE_UNIT)"
-
 uninstall:
 	rm -f $(BINDIR)/$(BINARY)
 	rm -f /usr/local/bin/$(BINARY)
 	rm -f $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service
-	@if [ -f $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT) ]; then \
-		systemctl --user disable --now $(SERVICE_UNIT) 2>/dev/null || true; \
-		rm -f $(SYSTEMD_USER_DIR)/$(SERVICE_UNIT); \
-		systemctl --user daemon-reload; \
-	fi
 	@echo "Uninstalled $(BINARY)"
+	@echo "To remove the systemd service, run: gopass-secret-service uninstall"
 
 test:
 	go test -v ./...
@@ -94,10 +80,6 @@ fmt:
 run: build
 	./$(BINARY) -d
 
-# Create config directory
-config-dir:
-	mkdir -p $(HOME)/.config/gopass-secret-service
-
 # Show help
 help:
 	@echo "gopass-secret-service Makefile"
@@ -106,8 +88,7 @@ help:
 	@echo "  build            Build the binary"
 	@echo "  install          Install to ~/.local/bin (no root required)"
 	@echo "  install-system   Install to /usr/local/bin (requires root)"
-	@echo "  install-service  Install + enable as systemd user service"
-	@echo "  uninstall        Remove installed files and service"
+	@echo "  uninstall        Remove installed files"
 	@echo "  test             Run unit tests"
 	@echo "  test-integration Run integration tests"
 	@echo "  run              Build and run with debug logging"
@@ -119,8 +100,6 @@ help:
 	@echo "Variables:"
 	@echo "  PREFIX           Installation prefix (default: ~/.local)"
 	@echo ""
-	@echo "Examples:"
-	@echo "  make build                    # Build binary"
-	@echo "  make install                  # Install to ~/.local/bin"
-	@echo "  make install PREFIX=/opt/bin  # Install to custom location"
-	@echo "  make install-system           # Install to /usr/local/bin (needs sudo)"
+	@echo "Systemd service:"
+	@echo "  gopass-secret-service install    # Install systemd user service"
+	@echo "  gopass-secret-service uninstall  # Remove systemd user service"
