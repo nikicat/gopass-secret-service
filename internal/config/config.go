@@ -147,7 +147,8 @@ func (c *Config) loadFromFile() error {
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(data, c)
+	expanded := os.ExpandEnv(string(data))
+	return yaml.Unmarshal([]byte(expanded), c)
 }
 
 func (c *Config) applyEnv() {
