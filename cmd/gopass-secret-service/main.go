@@ -70,6 +70,12 @@ func main() {
 	}
 
 	log.Printf("Starting gopass-secret-service version %s", Version)
+	if cfg.BusAddress != "" {
+		log.Printf("Using bus address: %s", cfg.BusAddress)
+	} else {
+		log.Printf("Using session bus")
+	}
+	log.Printf("Config file: %s", cfg.ConfigPath)
 	log.Printf("Using gopass prefix: %s", cfg.Prefix)
 	log.Printf("Default collection: %s", cfg.DefaultCollection)
 
