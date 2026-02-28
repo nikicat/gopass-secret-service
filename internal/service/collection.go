@@ -324,11 +324,12 @@ func (c *Collection) Delete() (dbus.ObjectPath, *dbus.Error) {
 		return "/", ErrObjectNotFound(err.Error())
 	}
 
-	// Unexport from D-Bus
-	c.Unexport()
+	// Remove from collection manager (unexports from D-Bus and removes from in-memory map)
+	c.svc.collections.Remove(c.name)
 
-	// Emit CollectionDeleted signal
+	// Emit CollectionDeleted signal and update Collections property
 	c.svc.emitCollectionDeleted(c.path)
+	c.svc.refreshCollections()
 
 	// Return "/" to indicate no prompt needed
 	return "/", nil
