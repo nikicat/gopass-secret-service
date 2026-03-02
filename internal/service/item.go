@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/godbus/dbus/v5/prop"
 
 	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
@@ -34,6 +33,110 @@ func (i *Item) Path() dbus.ObjectPath {
 	return i.path
 }
 
+// itemPropsHandler implements org.freedesktop.DBus.Properties for items,
+// reading from the store on every access instead of caching at export time.
+type itemPropsHandler struct {
+	item *Item
+}
+
+func (h *itemPropsHandler) Get(iface, property string) (dbus.Variant, *dbus.Error) {
+	if iface != dbtypes.ItemInterface {
+		return dbus.Variant{}, ErrUnsupported("unknown interface: " + iface)
+	}
+
+	ctx := context.Background()
+	data, err := h.item.svc.store.GetItem(ctx, h.item.collection, h.item.id)
+	if err != nil {
+		// Return zero values if store is unavailable
+		switch property {
+		case "Label":
+			return dbus.MakeVariant(""), nil
+		case "Attributes":
+			return dbus.MakeVariant(map[string]string{}), nil
+		case "Locked":
+			return dbus.MakeVariant(false), nil
+		case "Created", "Modified":
+			return dbus.MakeVariant(uint64(0)), nil
+		default:
+			return dbus.Variant{}, ErrUnsupported("unknown property: " + property)
+		}
+	}
+
+	switch property {
+	case "Label":
+		return dbus.MakeVariant(data.Label), nil
+	case "Attributes":
+		attrs := data.Attributes
+		if attrs == nil {
+			attrs = map[string]string{}
+		}
+		return dbus.MakeVariant(attrs), nil
+	case "Locked":
+		return dbus.MakeVariant(data.Locked), nil
+	case "Created":
+		return dbus.MakeVariant(uint64(data.Created.Unix())), nil
+	case "Modified":
+		return dbus.MakeVariant(uint64(data.Modified.Unix())), nil
+	default:
+		return dbus.Variant{}, ErrUnsupported("unknown property: " + property)
+	}
+}
+
+func (h *itemPropsHandler) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
+	if iface != dbtypes.ItemInterface {
+		return nil, ErrUnsupported("unknown interface: " + iface)
+	}
+
+	result := map[string]dbus.Variant{
+		"Label":      dbus.MakeVariant(""),
+		"Attributes": dbus.MakeVariant(map[string]string{}),
+		"Locked":     dbus.MakeVariant(false),
+		"Created":    dbus.MakeVariant(uint64(0)),
+		"Modified":   dbus.MakeVariant(uint64(0)),
+	}
+
+	ctx := context.Background()
+	data, err := h.item.svc.store.GetItem(ctx, h.item.collection, h.item.id)
+	if err != nil {
+		return result, nil
+	}
+
+	attrs := data.Attributes
+	if attrs == nil {
+		attrs = map[string]string{}
+	}
+	result["Label"] = dbus.MakeVariant(data.Label)
+	result["Attributes"] = dbus.MakeVariant(attrs)
+	result["Locked"] = dbus.MakeVariant(data.Locked)
+	result["Created"] = dbus.MakeVariant(uint64(data.Created.Unix()))
+	result["Modified"] = dbus.MakeVariant(uint64(data.Modified.Unix()))
+
+	return result, nil
+}
+
+func (h *itemPropsHandler) Set(iface, property string, value dbus.Variant) *dbus.Error {
+	if iface != dbtypes.ItemInterface {
+		return ErrUnsupported("unknown interface: " + iface)
+	}
+
+	switch property {
+	case "Label":
+		label, ok := value.Value().(string)
+		if !ok {
+			return ErrUnsupported("invalid label type")
+		}
+		return h.item.setLabel(label)
+	case "Attributes":
+		attrs, ok := value.Value().(map[string]string)
+		if !ok {
+			return ErrUnsupported("invalid attributes type")
+		}
+		return h.item.setAttributes(attrs)
+	default:
+		return ErrUnsupported("property is read-only: " + property)
+	}
+}
+
 // Export exports the item to D-Bus
 func (i *Item) Export() error {
 	conn := i.svc.conn
@@ -43,60 +146,12 @@ func (i *Item) Export() error {
 		return err
 	}
 
-	// Set up properties
-	propsSpec := map[string]map[string]*prop.Prop{
-		dbtypes.ItemInterface: {
-			"Locked": {
-				Value:    false,
-				Writable: false,
-				Emit:     prop.EmitTrue,
-				Callback: nil,
-			},
-			"Attributes": {
-				Value:    map[string]string{},
-				Writable: true,
-				Emit:     prop.EmitTrue,
-				Callback: func(c *prop.Change) *dbus.Error {
-					attrs, ok := c.Value.(map[string]string)
-					if !ok {
-						return ErrUnsupported("invalid attributes type")
-					}
-					return i.setAttributes(attrs)
-				},
-			},
-			"Label": {
-				Value:    "",
-				Writable: true,
-				Emit:     prop.EmitTrue,
-				Callback: func(c *prop.Change) *dbus.Error {
-					label, ok := c.Value.(string)
-					if !ok {
-						return ErrUnsupported("invalid label type")
-					}
-					return i.setLabel(label)
-				},
-			},
-			"Created": {
-				Value:    uint64(0),
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-			"Modified": {
-				Value:    uint64(0),
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-		},
-	}
-
-	props, err := prop.Export(conn, i.path, propsSpec)
-	if err != nil {
+	// Export a custom Properties handler that reads from the store on every access
+	handler := &itemPropsHandler{item: i}
+	if err := conn.Export(handler, i.path, "org.freedesktop.DBus.Properties"); err != nil {
 		conn.Export(nil, i.path, dbtypes.ItemInterface)
 		return err
 	}
-
-	// Update properties with actual values
-	i.refreshProperties(props)
 
 	// Export introspection - must include Properties interface for clients
 	introXML := `<node>
@@ -269,20 +324,6 @@ func (i *Item) setLabel(label string) *dbus.Error {
 
 	i.svc.emitItemChanged(i.collection, i.path)
 	return nil
-}
-
-func (i *Item) refreshProperties(props *prop.Properties) {
-	ctx := context.Background()
-	item, err := i.svc.store.GetItem(ctx, i.collection, i.id)
-	if err != nil {
-		return
-	}
-
-	props.SetMust(dbtypes.ItemInterface, "Label", item.Label)
-	props.SetMust(dbtypes.ItemInterface, "Attributes", item.Attributes)
-	props.SetMust(dbtypes.ItemInterface, "Created", uint64(item.Created.Unix()))
-	props.SetMust(dbtypes.ItemInterface, "Modified", uint64(item.Modified.Unix()))
-	props.SetMust(dbtypes.ItemInterface, "Locked", item.Locked)
 }
 
 // ItemManager manages items for the service

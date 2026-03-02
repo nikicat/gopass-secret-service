@@ -21,12 +21,14 @@ type mockStore struct {
 	mu          sync.Mutex
 	collections map[string]*store.CollectionData
 	aliases     map[string]string
+	items       map[string]map[string]*store.ItemData // collection -> id -> item
 }
 
 func newMockStore() *mockStore {
 	return &mockStore{
 		collections: make(map[string]*store.CollectionData),
 		aliases:     make(map[string]string),
+		items:       make(map[string]map[string]*store.ItemData),
 	}
 }
 
@@ -78,20 +80,95 @@ func (m *mockStore) SetCollectionLabel(_ context.Context, name, label string) er
 	return fmt.Errorf("not found")
 }
 
-func (m *mockStore) Items(_ context.Context, _ string) ([]string, error)     { return nil, nil }
-func (m *mockStore) GetItem(_ context.Context, _, _ string) (*store.ItemData, error) {
+func (m *mockStore) Items(_ context.Context, collection string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	collItems := m.items[collection]
+	ids := make([]string, 0, len(collItems))
+	for id := range collItems {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (m *mockStore) GetItem(_ context.Context, collection, id string) (*store.ItemData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if collItems, ok := m.items[collection]; ok {
+		if item, ok := collItems[id]; ok {
+			return item, nil
+		}
+	}
 	return nil, fmt.Errorf("not found")
 }
-func (m *mockStore) CreateItem(_ context.Context, _ string, _ *store.ItemData) (string, error) {
-	return "", nil
+
+func (m *mockStore) CreateItem(_ context.Context, collection string, item *store.ItemData) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.items[collection] == nil {
+		m.items[collection] = make(map[string]*store.ItemData)
+	}
+	m.items[collection][item.ID] = item
+	return item.ID, nil
 }
-func (m *mockStore) UpdateItem(_ context.Context, _, _ string, _ *store.ItemData) error { return nil }
-func (m *mockStore) DeleteItem(_ context.Context, _, _ string) error                    { return nil }
-func (m *mockStore) SearchItems(_ context.Context, _ string, _ map[string]string) ([]*store.ItemData, error) {
-	return nil, nil
+
+func (m *mockStore) UpdateItem(_ context.Context, collection, id string, item *store.ItemData) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.items[collection] == nil {
+		return fmt.Errorf("not found")
+	}
+	m.items[collection][id] = item
+	return nil
 }
-func (m *mockStore) SearchAllItems(_ context.Context, _ map[string]string) (map[string][]*store.ItemData, error) {
-	return nil, nil
+
+func (m *mockStore) DeleteItem(_ context.Context, collection, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if collItems, ok := m.items[collection]; ok {
+		delete(collItems, id)
+	}
+	return nil
+}
+
+func (m *mockStore) SearchItems(_ context.Context, collection string, attrs map[string]string) ([]*store.ItemData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var results []*store.ItemData
+	for _, item := range m.items[collection] {
+		match := true
+		for k, v := range attrs {
+			if item.Attributes[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			results = append(results, item)
+		}
+	}
+	return results, nil
+}
+
+func (m *mockStore) SearchAllItems(_ context.Context, attrs map[string]string) (map[string][]*store.ItemData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	results := make(map[string][]*store.ItemData)
+	for coll, collItems := range m.items {
+		for _, item := range collItems {
+			match := true
+			for k, v := range attrs {
+				if item.Attributes[k] != v {
+					match = false
+					break
+				}
+			}
+			if match {
+				results[coll] = append(results[coll], item)
+			}
+		}
+	}
+	return results, nil
 }
 func (m *mockStore) LockCollection(_ context.Context, _ string) error   { return nil }
 func (m *mockStore) UnlockCollection(_ context.Context, _ string) error { return nil }
@@ -404,6 +481,127 @@ func TestUnlock_ItemPath(t *testing.T) {
 	}
 }
 
+func TestItemProperties_ReflectStoreData(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	// Pre-populate the store with a collection and item
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		"i52f9c2333e2246e1bd6e533333f68788": {
+			ID:    "i52f9c2333e2246e1bd6e533333f68788",
+			Label: "My Secret",
+			Attributes: map[string]string{
+				"service": "google-workspace",
+				"user":    "alice@example.com",
+			},
+			Created:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			Modified: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	ms.mu.Unlock()
+
+	// Directly export the item (simulates what ExportAllItems does)
+	_, err := svc.items.GetOrCreate("default", "i52f9c2333e2246e1bd6e533333f68788")
+	if err != nil {
+		t.Fatalf("GetOrCreate item: %v", err)
+	}
+
+	// Read D-Bus properties via the connection
+	itemPath := dbtypes.ItemPath("default", "i52f9c2333e2246e1bd6e533333f68788")
+	obj := svc.conn.Object("org.freedesktop.secrets", itemPath)
+
+	variant, err := obj.GetProperty(dbtypes.ItemInterface + ".Label")
+	if err != nil {
+		t.Fatalf("GetProperty Label: %v", err)
+	}
+	label, ok := variant.Value().(string)
+	if !ok {
+		t.Fatalf("Label is not a string: %T", variant.Value())
+	}
+	if label != "My Secret" {
+		t.Errorf("Label = %q, want %q", label, "My Secret")
+	}
+
+	variant, err = obj.GetProperty(dbtypes.ItemInterface + ".Attributes")
+	if err != nil {
+		t.Fatalf("GetProperty Attributes: %v", err)
+	}
+	attrs, ok := variant.Value().(map[string]string)
+	if !ok {
+		t.Fatalf("Attributes is not map[string]string: %T", variant.Value())
+	}
+	if attrs["service"] != "google-workspace" {
+		t.Errorf("Attributes[service] = %q, want %q", attrs["service"], "google-workspace")
+	}
+	if attrs["user"] != "alice@example.com" {
+		t.Errorf("Attributes[user] = %q, want %q", attrs["user"], "alice@example.com")
+	}
+}
+
+func TestItemProperties_EmptyWhenStoreFailsDuringExport(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	// Store has NO item data yet — simulates gpg-agent not ready at startup
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.mu.Unlock()
+
+	// Export item — refreshProperties will call GetItem which returns "not found"
+	_, err := svc.items.GetOrCreate("default", "i52f9c2333e2246e1bd6e533333f68788")
+	if err != nil {
+		t.Fatalf("GetOrCreate item: %v", err)
+	}
+
+	// NOW add the item to the store (simulates gpg-agent becoming available)
+	ms.mu.Lock()
+	ms.items["default"] = map[string]*store.ItemData{
+		"i52f9c2333e2246e1bd6e533333f68788": {
+			ID:    "i52f9c2333e2246e1bd6e533333f68788",
+			Label: "My Secret",
+			Attributes: map[string]string{
+				"service": "google-workspace",
+				"user":    "alice@example.com",
+			},
+			Created:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			Modified: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	ms.mu.Unlock()
+
+	// Read D-Bus properties — they should reflect the store, not the stale empty defaults
+	itemPath := dbtypes.ItemPath("default", "i52f9c2333e2246e1bd6e533333f68788")
+	obj := svc.conn.Object("org.freedesktop.secrets", itemPath)
+
+	variant, err := obj.GetProperty(dbtypes.ItemInterface + ".Label")
+	if err != nil {
+		t.Fatalf("GetProperty Label: %v", err)
+	}
+	label, ok := variant.Value().(string)
+	if !ok {
+		t.Fatalf("Label is not a string: %T", variant.Value())
+	}
+	if label != "My Secret" {
+		t.Errorf("Label = %q, want %q", label, "My Secret")
+	}
+
+	variant, err = obj.GetProperty(dbtypes.ItemInterface + ".Attributes")
+	if err != nil {
+		t.Fatalf("GetProperty Attributes: %v", err)
+	}
+	attrs, ok := variant.Value().(map[string]string)
+	if !ok {
+		t.Fatalf("Attributes is not map[string]string: %T", variant.Value())
+	}
+	if attrs["service"] != "google-workspace" {
+		t.Errorf("Attributes[service] = %q, want %q", attrs["service"], "google-workspace")
+	}
+	if attrs["user"] != "alice@example.com" {
+		t.Errorf("Attributes[user] = %q, want %q", attrs["user"], "alice@example.com")
+	}
+}
 
 func containsPath(paths []dbus.ObjectPath, target dbus.ObjectPath) bool {
 	for _, p := range paths {
