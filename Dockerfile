@@ -4,7 +4,7 @@
 # Run:     docker run --rm gopass-secret-service-test
 # Shell:   docker run --rm -it gopass-secret-service-test /bin/bash
 
-FROM golang:1.25.6-bookworm
+FROM golang:1.26-bookworm
 
 # Install dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
