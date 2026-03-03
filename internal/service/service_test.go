@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
 	"github.com/nikicat/gopass-secret-service/internal/config"
 	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 	"github.com/nikicat/gopass-secret-service/internal/store"
@@ -214,24 +215,24 @@ func startTestBus(t *testing.T) (*dbus.Conn, func()) {
 
 	conn, err := dbus.Dial(addr)
 	if err != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		t.Fatalf("dial bus: %v", err)
 	}
 	if err := conn.Auth(nil); err != nil {
 		conn.Close()
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		t.Fatalf("auth: %v", err)
 	}
 	if err := conn.Hello(); err != nil {
 		conn.Close()
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
 		t.Fatalf("hello: %v", err)
 	}
 
 	cleanup := func() {
 		conn.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}
 	return conn, cleanup
 }
@@ -264,7 +265,7 @@ func newTestService(t *testing.T) (*Service, *mockStore, func()) {
 	}
 
 	return svc, ms, func() {
-		svc.Stop()
+		_ = svc.Stop()
 		cleanup()
 	}
 }

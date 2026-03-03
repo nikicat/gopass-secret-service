@@ -1,44 +1,51 @@
-run:
-  timeout: 5m
-
+version: "2"
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - gofmt
-    - goimports
+    - gosec
     - misspell
     - unconvert
     - unparam
-    - gosec
-
-linters-settings:
-  goimports:
-    local-prefixes: github.com/nikicat/gopass-secret-service
-
-  gosec:
-    excludes:
-      - G104  # Unhandled errors (too noisy for D-Bus code)
-      - G115  # Integer overflow - Unix timestamps won't overflow uint64
-
-  errcheck:
-    exclude-functions:
-      # D-Bus Export/Emit calls where errors are non-critical
-      - (*github.com/godbus/dbus/v5.Conn).Export
-      - (*github.com/godbus/dbus/v5.Conn).Emit
-
-issues:
-  exclude-rules:
-    # Ignore long lines in test files
-    - path: _test\.go
-      linters:
-        - lll
-
-    # Ignore unused parameters in interface implementations
-    - linters:
-        - unparam
-      text: "always receives"
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*github.com/godbus/dbus/v5.Conn).Export
+        - (*github.com/godbus/dbus/v5.Conn).Emit
+    gosec:
+      excludes:
+        - G104
+        - G115
+        - G117  # Struct field "Secret" is domain data, not a credential
+        - G204  # Subprocess args are controlled (systemctl, dbus-daemon)
+        - G306  # Systemd unit files should be world-readable (0644)
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - lll
+        path: _test\.go
+      - linters:
+          - unparam
+        text: always receives
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/nikicat/gopass-secret-service
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

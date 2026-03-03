@@ -1,3 +1,5 @@
+MAKEFLAGS += -j
+
 BINARY := gopass-secret-service
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
@@ -9,7 +11,8 @@ PREFIX := $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 DBUS_SERVICE_DIR := $(HOME)/.local/share/dbus-1/services
 
-.PHONY: all build clean install install-user install-system uninstall test lint fmt run
+.PHONY: all build clean install install-user install-system uninstall test lint fmt run \
+	check check-go-fmt check-go-vet check-go-staticcheck pre-commit
 
 all: build
 
@@ -62,6 +65,32 @@ uninstall:
 	@echo "Uninstalled $(BINARY)"
 	@echo "To remove the systemd service, run: gopass-secret-service uninstall"
 
+# Run checks and tests in parallel
+pre-commit: check test
+
+# --- Checks (linters, formatters, static analysis) ---
+
+check: lint check-go-fmt check-go-vet check-go-staticcheck
+
+check-go-fmt:
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "Go files need formatting:"; \
+		echo "$$unformatted"; \
+		echo "Run 'make fmt' to fix."; \
+		exit 1; \
+	fi
+
+check-go-vet:
+	go vet ./...
+
+check-go-staticcheck:
+	@out=$$(staticcheck ./... 2>&1 | grep -v '^-:'); \
+	if [ -n "$$out" ]; then \
+		echo "$$out"; \
+		exit 1; \
+	fi
+
 test:
 	go test -v ./...
 
@@ -89,6 +118,7 @@ help:
 	@echo "  install          Install to ~/.local/bin (no root required)"
 	@echo "  install-system   Install to /usr/local/bin (requires root)"
 	@echo "  uninstall        Remove installed files"
+	@echo "  check            Run all checks (fmt, vet, staticcheck)"
 	@echo "  test             Run unit tests"
 	@echo "  test-integration Run integration tests"
 	@echo "  run              Build and run with debug logging"

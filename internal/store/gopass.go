@@ -151,9 +151,15 @@ func (s *GopassStore) CreateCollection(ctx context.Context, name, label string) 
 
 	sec := secrets.New()
 	sec.SetPassword("collection-metadata")
-	sec.Set(collLabelKey, label)
-	sec.Set(collCreatedKey, now)
-	sec.Set(collModifiedKey, now)
+	if err := sec.Set(collLabelKey, label); err != nil {
+		return fmt.Errorf("set label: %w", err)
+	}
+	if err := sec.Set(collCreatedKey, now); err != nil {
+		return fmt.Errorf("set created: %w", err)
+	}
+	if err := sec.Set(collModifiedKey, now); err != nil {
+		return fmt.Errorf("set modified: %w", err)
+	}
 
 	return s.store.Set(ctx, metaPath, sec)
 }
@@ -176,9 +182,15 @@ func (s *GopassStore) SetCollectionLabel(ctx context.Context, name, label string
 
 	sec := secrets.New()
 	sec.SetPassword("collection-metadata")
-	sec.Set(collLabelKey, label)
-	sec.Set(collCreatedKey, existing.Created.Format(time.RFC3339))
-	sec.Set(collModifiedKey, now)
+	if err := sec.Set(collLabelKey, label); err != nil {
+		return fmt.Errorf("set label: %w", err)
+	}
+	if err := sec.Set(collCreatedKey, existing.Created.Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("set created: %w", err)
+	}
+	if err := sec.Set(collModifiedKey, now); err != nil {
+		return fmt.Errorf("set modified: %w", err)
+	}
 
 	return s.store.Set(ctx, metaPath, sec)
 }
@@ -288,10 +300,16 @@ func (s *GopassStore) CreateItem(ctx context.Context, collection string, item *I
 
 	sec := secrets.New()
 	sec.SetPassword(string(item.Secret))
-	sec.Set(labelKey, item.Label)
-	sec.Set(createdKey, item.Created.Format(time.RFC3339))
-	sec.Set(modifiedKey, item.Modified.Format(time.RFC3339))
-	sec.Set(contentTypeKey, item.ContentType)
+	for _, kv := range []struct{ k, v string }{
+		{labelKey, item.Label},
+		{createdKey, item.Created.Format(time.RFC3339)},
+		{modifiedKey, item.Modified.Format(time.RFC3339)},
+		{contentTypeKey, item.ContentType},
+	} {
+		if err := sec.Set(kv.k, kv.v); err != nil {
+			return "", fmt.Errorf("set %s: %w", kv.k, err)
+		}
+	}
 
 	// Add user attributes (sorted for consistency)
 	keys := make([]string, 0, len(item.Attributes))
@@ -300,7 +318,9 @@ func (s *GopassStore) CreateItem(ctx context.Context, collection string, item *I
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		sec.Set(k, item.Attributes[k])
+		if err := sec.Set(k, item.Attributes[k]); err != nil {
+			return "", fmt.Errorf("set attr %s: %w", k, err)
+		}
 	}
 
 	itemPath := s.mapper.ItemPath(collection, item.ID)
@@ -329,10 +349,16 @@ func (s *GopassStore) UpdateItem(ctx context.Context, collection, id string, ite
 
 	sec := secrets.New()
 	sec.SetPassword(string(item.Secret))
-	sec.Set(labelKey, item.Label)
-	sec.Set(createdKey, item.Created.Format(time.RFC3339))
-	sec.Set(modifiedKey, item.Modified.Format(time.RFC3339))
-	sec.Set(contentTypeKey, item.ContentType)
+	for _, kv := range []struct{ k, v string }{
+		{labelKey, item.Label},
+		{createdKey, item.Created.Format(time.RFC3339)},
+		{modifiedKey, item.Modified.Format(time.RFC3339)},
+		{contentTypeKey, item.ContentType},
+	} {
+		if err := sec.Set(kv.k, kv.v); err != nil {
+			return fmt.Errorf("set %s: %w", kv.k, err)
+		}
+	}
 
 	// Add user attributes (sorted for consistency)
 	keys := make([]string, 0, len(item.Attributes))
@@ -341,7 +367,9 @@ func (s *GopassStore) UpdateItem(ctx context.Context, collection, id string, ite
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		sec.Set(k, item.Attributes[k])
+		if err := sec.Set(k, item.Attributes[k]); err != nil {
+			return fmt.Errorf("set attr %s: %w", k, err)
+		}
 	}
 
 	itemPath := s.mapper.ItemPath(collection, id)
@@ -458,7 +486,9 @@ func (s *GopassStore) SetAlias(ctx context.Context, alias, collection string) er
 	newSec := secrets.New()
 	newSec.SetPassword("aliases")
 	for k, v := range aliases {
-		newSec.Set(k, v)
+		if err := newSec.Set(k, v); err != nil {
+			return fmt.Errorf("set alias %q: %w", k, err)
+		}
 	}
 
 	return s.store.Set(ctx, aliasPath, newSec)
