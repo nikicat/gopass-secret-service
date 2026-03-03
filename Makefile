@@ -99,7 +99,6 @@ test-integration: build
 	./test.sh
 
 lint:
-	go vet ./...
 	golangci-lint run
 
 fmt:

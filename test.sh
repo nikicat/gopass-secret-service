@@ -5,9 +5,6 @@
 # Note: We don't use set -e because we want to continue on test failures
 
 BINARY="./gopass-secret-service"
-PID_FILE="/tmp/gopass-secret-service-test.pid"
-DBUS_PID_FILE="/tmp/gopass-secret-service-dbus.pid"
-LOG_FILE="/tmp/gopass-secret-service-test.log"
 TIMEOUT=5
 
 # Colors for output
@@ -16,11 +13,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Track if we started D-Bus ourselves
-STARTED_DBUS=false
+# Create temporary directory for all test data (bus socket, pid files, logs, gopass, etc.)
+TEST_TMPDIR=$(mktemp -d -t gopass-secret-service-test.XXXXXX)
+PID_FILE="$TEST_TMPDIR/service.pid"
+LOG_FILE="$TEST_TMPDIR/service.log"
 
-# Temporary directories for isolated testing
-TEST_TMPDIR=""
 ORIGINAL_HOME="$HOME"
 ORIGINAL_GNUPGHOME="${GNUPGHOME:-}"
 
@@ -49,17 +46,12 @@ cleanup() {
                 kill -9 "$PID" 2>/dev/null || true
             fi
         fi
-        rm -f "$PID_FILE"
     fi
 
-    # Stop D-Bus daemon if we started it
-    if [ "$STARTED_DBUS" = true ] && [ -f "$DBUS_PID_FILE" ]; then
-        DBUS_PID=$(cat "$DBUS_PID_FILE")
-        if kill -0 "$DBUS_PID" 2>/dev/null; then
-            echo "Stopping D-Bus daemon (PID $DBUS_PID)..."
-            kill -TERM "$DBUS_PID" 2>/dev/null || true
-        fi
-        rm -f "$DBUS_PID_FILE"
+    # Stop the private D-Bus daemon
+    if [ -n "$DBUS_DAEMON_PID" ] && kill -0 "$DBUS_DAEMON_PID" 2>/dev/null; then
+        echo "Stopping D-Bus daemon (PID $DBUS_DAEMON_PID)..."
+        kill -TERM "$DBUS_DAEMON_PID" 2>/dev/null || true
     fi
 
     # Restore original environment
@@ -80,54 +72,32 @@ cleanup() {
 }
 
 start_dbus() {
-    # Check if we already have a working D-Bus session
-    if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
-        if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
-            echo "Using existing D-Bus session: $DBUS_SESSION_BUS_ADDRESS"
-            return 0
+    echo "Starting private D-Bus daemon..."
+
+    DBUS_SOCK="$TEST_TMPDIR/bus.sock"
+    DBUS_ADDR="unix:path=$DBUS_SOCK"
+
+    dbus-daemon --session --nofork --address="$DBUS_ADDR" &
+    DBUS_DAEMON_PID=$!
+
+    # Wait for socket to appear
+    for i in $(seq 1 50); do
+        if [ -S "$DBUS_SOCK" ]; then
+            break
         fi
-    fi
+        sleep 0.1
+    done
 
-    echo "Starting isolated D-Bus session..."
-
-    # Use dbus-run-session if available (preferred method)
-    if command -v dbus-run-session &> /dev/null; then
-        # For dbus-run-session, we need to exec this script within the session
-        if [ -z "$DBUS_SESSION_STARTED" ]; then
-            export DBUS_SESSION_STARTED=1
-            exec dbus-run-session -- "$0" "$@"
-        fi
-        echo "Running inside dbus-run-session"
-        return 0
-    fi
-
-    # Fallback: start dbus-daemon manually
-    # Create a temporary file for the address
-    DBUS_ADDR_FILE=$(mktemp)
-
-    # Start dbus-daemon
-    dbus-daemon --session --fork --print-address > "$DBUS_ADDR_FILE" 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to start D-Bus daemon${NC}"
-        cat "$DBUS_ADDR_FILE"
-        rm -f "$DBUS_ADDR_FILE"
+    if [ ! -S "$DBUS_SOCK" ]; then
+        echo -e "${RED}D-Bus daemon failed to create socket${NC}"
         exit 1
     fi
 
-    DBUS_SESSION_BUS_ADDRESS=$(cat "$DBUS_ADDR_FILE")
-    rm -f "$DBUS_ADDR_FILE"
-    export DBUS_SESSION_BUS_ADDRESS
-
-    # Find the PID by looking for our dbus-daemon
-    DBUS_PID=$(pgrep -n dbus-daemon)
-    echo "$DBUS_PID" > "$DBUS_PID_FILE"
-    STARTED_DBUS=true
-
-    echo "D-Bus daemon started (PID: $DBUS_PID)"
+    export DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR"
+    echo "D-Bus daemon started (PID: $DBUS_DAEMON_PID)"
     echo "D-Bus address: $DBUS_SESSION_BUS_ADDRESS"
 
     # Verify D-Bus is working
-    sleep 0.5
     if ! dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
         echo -e "${RED}D-Bus daemon started but not responding${NC}"
         exit 1
@@ -136,9 +106,6 @@ start_dbus() {
 
 setup_isolated_environment() {
     echo "Setting up isolated test environment..."
-
-    # Create temporary directory for all test data
-    TEST_TMPDIR=$(mktemp -d -t gopass-secret-service-test.XXXXXX)
     echo "Test directory: $TEST_TMPDIR"
 
     # Set up isolated HOME (all data stays within TEST_TMPDIR)
@@ -206,16 +173,11 @@ EOF
 # Set trap for cleanup on exit
 trap cleanup EXIT
 
-# Start D-Bus session if needed
+# Start private D-Bus daemon
 start_dbus
 
 # Set up isolated gopass/GPG environment
 setup_isolated_environment
-
-# Kill any existing instances of our service
-echo "Killing any existing gopass-secret-service instances..."
-pkill -9 -f "gopass-secret-service" 2>/dev/null || true
-sleep 1
 
 # Check if binary exists
 if [ ! -x "$BINARY" ]; then
