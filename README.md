@@ -6,13 +6,25 @@
 Use [GoPass](https://www.gopass.pw/) as the backend for the [freedesktop.org Secret Service API](https://specifications.freedesktop.org/secret-service/latest/).
 
 ```
- Desktop Apps (Firefox, Chrome, VS Code, Electron apps, ...)
-                    ↕ D-Bus Secret Service API
-        gopass-secret-service (this project)
-                    ↕
-            GoPass → GPG-encrypted files
-                    ↕
-          ~/.password-store/ (git-syncable)
+┌─────────┐ ┌─────────┐ ┌─────────┐ ┌──────────────┐
+│ Firefox │ │ Chrome  │ │ VS Code │ │ Electron app │  ...
+└────┬────┘ └────┬────┘ └────┬────┘ └──────┬───────┘
+     │           │           │             │
+     └───────────┴─────┬─────┴─────────────┘
+                       │ D-Bus Secret Service API
+              ┌────────┴─────────┐
+              │ gopass-secret-   │
+              │ service          │  ← this project
+              └────────┬─────────┘
+                       │ Go API
+                 ┌─────┴─────┐
+                 │  GoPass   │
+                 └─────┬─────┘
+                       │ GPG
+            ┌──────────┴───────────┐
+            │ ~/.password-store/   │
+            │  (git-syncable)      │
+            └──────────────────────┘
 ```
 
 ## Why
