@@ -17,17 +17,23 @@ This enables desktop applications (browsers, email clients, etc.) to store and r
 
 - [GoPass](https://www.gopass.pw/) installed and configured
 - GPG key set up for GoPass
-- Go 1.21+ (for building from source)
+- Go 1.26+ (for building from source)
 
 ## Installation
 
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/gopass-secret-service.git
+git clone https://github.com/nikicat/gopass-secret-service.git
 cd gopass-secret-service
 make build
 make install
+```
+
+### Arch Linux (AUR)
+
+```bash
+yay -S gopass-secret-service
 ```
 
 ### D-Bus Activation
@@ -54,6 +60,16 @@ gopass-secret-service -d
 gopass-secret-service -p my-secrets
 ```
 
+### Subcommands
+
+```bash
+# Install systemd user service (enables auto-start on login)
+gopass-secret-service install
+
+# Remove systemd user service
+gopass-secret-service uninstall
+```
+
 ### CLI Options
 
 ```
@@ -63,8 +79,10 @@ Options:
   -c, --config PATH        Path to config file (default: ~/.config/gopass-secret-service/config.yaml)
   -s, --store-path PATH    GoPass store path (default: ~/.local/share/gopass/stores/root)
   -p, --prefix PREFIX      Prefix for secret-service entries in gopass (default: "secret-service")
+  -r, --replace            Replace existing secret-service provider
   -v, --verbose            Enable verbose logging
   -d, --debug              Enable debug logging
+      --bus-address ADDR   Custom D-Bus socket address (unix:path=...)
       --version            Print version and exit
   -h, --help               Show help message
 ```
@@ -91,7 +109,27 @@ log_file: ""
 
 # Replace existing secret-service provider
 replace: false
+
+# Custom D-Bus socket address (empty for session bus)
+bus_address: ""
 ```
+
+Environment variables are also supported and override config file values:
+
+```
+GOPASS_SECRET_SERVICE_CONFIG             Path to config file
+GOPASS_SECRET_SERVICE_STORE_PATH         GoPass store path
+GOPASS_SECRET_SERVICE_PREFIX             Prefix for secret-service entries
+GOPASS_SECRET_SERVICE_DEFAULT_COLLECTION Default collection name
+GOPASS_SECRET_SERVICE_LOG_LEVEL          Log level (debug, info, warn, error)
+GOPASS_SECRET_SERVICE_LOG_FILE           Log file path
+GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)
+GOPASS_SECRET_SERVICE_BUS_ADDRESS        Custom D-Bus socket address
+```
+
+Environment variables in the config file are expanded (e.g. `$HOME`, `${XDG_DATA_HOME}`).
+
+Configuration priority (highest to lowest): CLI flags > environment variables > config file > defaults.
 
 ### Testing with secret-tool
 

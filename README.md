@@ -17,7 +17,7 @@ This enables desktop applications (browsers, email clients, etc.) to store and r
 ## Prerequisites
 
 - [GoPass](https://www.gopass.pw/) installed and configured with a GPG key
-- Go 1.21+ (for building from source)
+- Go 1.26+ (for building from source)
 
 ## Installation
 
@@ -71,15 +71,19 @@ secret-tool search service smtp
 
 ```
 gopass-secret-service [options]
+gopass-secret-service install     # Install systemd user service
+gopass-secret-service uninstall   # Remove systemd user service
 
 Options:
-  -c, --config PATH     Config file path (default: ~/.config/gopass-secret-service/config.yaml)
-  -p, --prefix PREFIX   GoPass prefix for secrets (default: "secret-service")
-  -r, --replace         Replace existing secret service provider
-  -d, --debug           Enable debug logging
-  -v, --verbose         Enable verbose logging
-      --version         Print version and exit
-  -h, --help            Show help
+  -c, --config PATH        Config file path (default: ~/.config/gopass-secret-service/config.yaml)
+  -s, --store-path PATH    GoPass store path (default: ~/.local/share/gopass/stores/root)
+  -p, --prefix PREFIX      GoPass prefix for secrets (default: "secret-service")
+  -r, --replace            Replace existing secret service provider
+  -d, --debug              Enable debug logging
+  -v, --verbose            Enable verbose logging
+      --bus-address ADDR   Custom D-Bus socket address (unix:path=...)
+      --version            Print version and exit
+  -h, --help               Show help
 ```
 
 ## Configuration
@@ -87,6 +91,9 @@ Options:
 Create `~/.config/gopass-secret-service/config.yaml`:
 
 ```yaml
+# GoPass store path
+store_path: ~/.local/share/gopass/stores/root
+
 # Prefix in gopass for Secret Service entries
 prefix: secret-service
 
@@ -96,9 +103,30 @@ default_collection: default
 # Logging level: debug, info, warn, error
 log_level: info
 
+# Log file path (empty for stderr)
+log_file: ""
+
 # Replace existing secret-service provider on startup
 replace: false
+
+# Custom D-Bus socket address (empty for session bus)
+bus_address: ""
 ```
+
+Environment variables are also supported (override config file values):
+
+```
+GOPASS_SECRET_SERVICE_CONFIG             Path to config file
+GOPASS_SECRET_SERVICE_STORE_PATH         GoPass store path
+GOPASS_SECRET_SERVICE_PREFIX             Prefix for secret-service entries
+GOPASS_SECRET_SERVICE_DEFAULT_COLLECTION Default collection name
+GOPASS_SECRET_SERVICE_LOG_LEVEL          Log level (debug, info, warn, error)
+GOPASS_SECRET_SERVICE_LOG_FILE           Log file path
+GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)
+GOPASS_SECRET_SERVICE_BUS_ADDRESS        Custom D-Bus socket address
+```
+
+Environment variables in the config file are expanded (e.g. `$HOME`, `${XDG_DATA_HOME}`).
 
 ## How It Works
 
