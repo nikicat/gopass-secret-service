@@ -1,23 +1,83 @@
 # gopass-secret-service
 
-A D-Bus Secret Service provider that uses [GoPass](https://www.gopass.pw/) as the backend storage.
+[![CI](https://github.com/nikicat/gopass-secret-service/actions/workflows/ci.yml/badge.svg)](https://github.com/nikicat/gopass-secret-service/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-This enables desktop applications (browsers, email clients, etc.) to store and retrieve secrets via the standard [freedesktop.org Secret Service API](https://specifications.freedesktop.org/secret-service/latest/) while GoPass handles the actual encryption and storage with GPG.
+Use [GoPass](https://www.gopass.pw/) as the backend for the [freedesktop.org Secret Service API](https://specifications.freedesktop.org/secret-service/latest/).
 
-## Features
+```
+ Desktop Apps (Firefox, Chrome, VS Code, Electron apps, ...)
+                    ↕ D-Bus Secret Service API
+        gopass-secret-service (this project)
+                    ↕
+            GoPass → GPG-encrypted files
+                    ↕
+          ~/.password-store/ (git-syncable)
+```
 
-- Full implementation of the Secret Service D-Bus API
-- Secure storage using GoPass with GPG encryption
-- DH key exchange with AES-128-CBC for encrypted D-Bus transport
-- Multiple collections with attribute-based searching
-- Collection aliases (including "default")
-- D-Bus signals for real-time updates
-- CLI with config file support
+## Why
 
-## Prerequisites
+Linux desktop apps store secrets (passwords, tokens, API keys) via the Secret Service API, which typically means GNOME Keyring or KDE Wallet. If you use GoPass, your secrets end up in two places — GoPass for the terminal, keyring for GUI apps.
 
-- [GoPass](https://www.gopass.pw/) installed and configured with a GPG key
-- Go 1.26+ (for building from source)
+**gopass-secret-service** bridges this gap. Desktop apps write secrets into GoPass transparently, giving you:
+
+- **One store for everything** — CLI and GUI apps use the same GoPass entries
+- **GPG encryption you control** — audit with `gopass ls`, inspect with `gopass show`
+- **Git sync across machines** — GoPass's built-in git support works for all secrets
+- **No GNOME/KDE dependency** — single binary, works with any window manager or DE
+- **Drop-in replacement** for GNOME Keyring's Secret Service component
+
+## Compatibility
+
+**Works with** any application that uses libsecret or the Secret Service D-Bus API:
+
+Firefox, Chromium/Chrome, VS Code, Electron apps (Slack, Discord, etc.), NetworkManager, GNOME apps, `secret-tool`, Python `secretstorage`, and more.
+
+**Replaces** the Secret Service component of GNOME Keyring or KDE Wallet. Other keyring functions (SSH agent, GPG agent) are unaffected.
+
+## Quick Start
+
+**Prerequisites:** [GoPass](https://www.gopass.pw/) installed and configured with a GPG key.
+
+```bash
+# Install
+git clone https://github.com/nikicat/gopass-secret-service.git
+cd gopass-secret-service
+make build && make install   # installs to ~/.local/bin
+
+# Start (replace GNOME Keyring if running)
+gopass-secret-service -r &
+
+# Verify — store and retrieve a secret
+echo "test123" | secret-tool store --label='Test' app test
+secret-tool lookup app test   # → test123
+
+# Install as a systemd user service (auto-start on login)
+gopass-secret-service install
+```
+
+## Replacing GNOME Keyring
+
+The most common setup — use gopass-secret-service instead of GNOME Keyring for secret storage:
+
+```bash
+# One-time: start with --replace to take over the D-Bus name
+gopass-secret-service -r
+
+# Permanent: install as a systemd user service
+gopass-secret-service install
+systemctl --user start gopass-secret-service
+```
+
+To prevent GNOME Keyring from grabbing the Secret Service bus name at login, disable its secret service component:
+
+```bash
+# Copy the desktop file to override it
+cp /etc/xdg/autostart/gnome-keyring-secrets.desktop ~/.config/autostart/
+echo "Hidden=true" >> ~/.config/autostart/gnome-keyring-secrets.desktop
+```
+
+Or simply use the `-r` / `--replace` flag — gopass-secret-service will take over from whatever is currently running.
 
 ## Installation
 
@@ -30,7 +90,7 @@ make build
 make install   # Installs to ~/.local/bin (no root required)
 ```
 
-The default installation goes to `~/.local/bin`, which doesn't require root permissions. Make sure `~/.local/bin` is in your `PATH`:
+Make sure `~/.local/bin` is in your `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"  # Add to your .bashrc/.zshrc
@@ -42,95 +102,28 @@ export PATH="$HOME/.local/bin:$PATH"  # Add to your .bashrc/.zshrc
 sudo make install-system   # Installs to /usr/local/bin
 ```
 
-### Installation Options
+### Other Options
 
 ```bash
-make install                     # User-local: ~/.local/bin (default)
 make install PREFIX=/opt/myapps  # Custom location
-make install-system              # System-wide: /usr/local/bin (requires root)
 make help                        # Show all available targets
-```
-
-## Quick Start
-
-```bash
-# Start the service (or let D-Bus auto-start it)
-gopass-secret-service &
-
-# Store a secret
-echo "mypassword" | secret-tool store --label='Email' service smtp server mail.example.com
-
-# Retrieve a secret
-secret-tool lookup service smtp server mail.example.com
-
-# Search secrets
-secret-tool search service smtp
 ```
 
 ## Usage
 
-```
-gopass-secret-service [options]
-gopass-secret-service install     # Install systemd user service
-gopass-secret-service uninstall   # Remove systemd user service
-
-Options:
-  -c, --config PATH        Config file path (default: ~/.config/gopass-secret-service/config.yaml)
-  -s, --store-path PATH    GoPass store path (default: ~/.local/share/gopass/stores/root)
-  -p, --prefix PREFIX      GoPass prefix for secrets (default: "secret-service")
-  -r, --replace            Replace existing secret service provider
-  -d, --debug              Enable debug logging
-  -v, --verbose            Enable verbose logging
-      --bus-address ADDR   Custom D-Bus socket address (unix:path=...)
-      --version            Print version and exit
-  -h, --help               Show help
+```bash
+gopass-secret-service              # start in foreground
+gopass-secret-service -r           # replace existing provider (e.g., GNOME Keyring)
+gopass-secret-service -d           # debug logging
+gopass-secret-service install      # install systemd user service
+gopass-secret-service uninstall    # remove systemd user service
 ```
 
-## Configuration
-
-Create `~/.config/gopass-secret-service/config.yaml`:
-
-```yaml
-# GoPass store path
-store_path: ~/.local/share/gopass/stores/root
-
-# Prefix in gopass for Secret Service entries
-prefix: secret-service
-
-# Default collection name
-default_collection: default
-
-# Logging level: debug, info, warn, error
-log_level: info
-
-# Log file path (empty for stderr)
-log_file: ""
-
-# Replace existing secret-service provider on startup
-replace: false
-
-# Custom D-Bus socket address (empty for session bus)
-bus_address: ""
-```
-
-Environment variables are also supported (override config file values):
-
-```
-GOPASS_SECRET_SERVICE_CONFIG             Path to config file
-GOPASS_SECRET_SERVICE_STORE_PATH         GoPass store path
-GOPASS_SECRET_SERVICE_PREFIX             Prefix for secret-service entries
-GOPASS_SECRET_SERVICE_DEFAULT_COLLECTION Default collection name
-GOPASS_SECRET_SERVICE_LOG_LEVEL          Log level (debug, info, warn, error)
-GOPASS_SECRET_SERVICE_LOG_FILE           Log file path
-GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)
-GOPASS_SECRET_SERVICE_BUS_ADDRESS        Custom D-Bus socket address
-```
-
-Environment variables in the config file are expanded (e.g. `$HOME`, `${XDG_DATA_HOME}`).
+See the [full CLI, configuration, and environment variable reference](docs/README.md) for all options.
 
 ## How It Works
 
-Secrets are stored in GoPass under a configurable prefix:
+Secrets are stored in GoPass under a configurable prefix (default: `secret-service`):
 
 ```
 ~/.password-store/
@@ -151,20 +144,6 @@ _ss_created: 2024-01-15T10:30:00Z
 _ss_modified: 2024-01-15T10:30:00Z
 username: user@example.com
 ```
-
-## Replacing GNOME Keyring
-
-To use gopass-secret-service instead of GNOME Keyring:
-
-```bash
-# Stop GNOME Keyring's secret service component
-# (Method varies by distribution)
-
-# Start gopass-secret-service
-gopass-secret-service -r  # -r to replace if keyring is still running
-```
-
-For permanent replacement, disable the GNOME Keyring secret service component in your session startup.
 
 ## Troubleshooting
 
@@ -207,29 +186,19 @@ gpgconf --kill gpg-agent
 
 Other options: `pinentry-gtk`, `pinentry-curses`, `pinentry-tty`.
 
-## Compatibility
-
-Tested with:
-- `secret-tool` (libsecret)
-- Python `secretstorage` library
-- Applications using libsecret (Firefox, Chrome, GNOME apps)
-
 ## Documentation
 
-- [Detailed Usage Guide](docs/README.md)
+- [Full CLI & Configuration Reference](docs/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Target Audience & User Personas](docs/TARGET-AUDIENCE.md)
 
 ## Development
 
 ```bash
-# Run tests
-make test
-
-# Run integration tests
-./test.sh
-
-# Build
-make build
+make test       # Run tests
+./test.sh       # Run integration tests (Docker)
+make build      # Build
+make lint       # Lint
 ```
 
 ## License
