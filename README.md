@@ -47,6 +47,10 @@ Firefox, Chromium/Chrome, VS Code, Electron apps (Slack, Discord, etc.), Network
 
 **Replaces** the Secret Service component of GNOME Keyring or KDE Wallet. Other keyring functions (SSH agent, GPG agent) are unaffected.
 
+### Works great with [secrets-dispatcher](https://github.com/nikicat/secrets-dispatcher)
+
+Add per-operation approval, trust rules, and audit logging on top of gopass-secret-service. See which process is accessing which secret, approve or deny in real time, and auto-approve trusted patterns.
+
 ## Quick Start
 
 **Prerequisites:** [GoPass](https://www.gopass.pw/) installed and configured with a GPG key.
