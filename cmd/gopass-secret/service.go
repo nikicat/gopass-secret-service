@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,12 +11,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/nikicat/gopass-secret-service/internal/config"
 	"github.com/nikicat/gopass-secret-service/internal/service"
 )
-
-// Version is set at build time
-var Version = "dev"
 
 const unitName = "gopass-secret-service.service"
 
@@ -24,7 +21,7 @@ Description=GoPass Secret Service - D-Bus Secret Service backed by GoPass
 
 [Service]
 Type=simple
-ExecStart=%s
+ExecStart=%s service
 Restart=on-failure
 RestartSec=3
 
@@ -32,10 +29,10 @@ RestartSec=3
 WantedBy=default.target
 `
 
-func main() {
-	// Check for subcommands before parsing flags.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+func runService(args []string) {
+	// Check for sub-subcommands before parsing flags
+	if len(args) > 0 {
+		switch args[0] {
 		case "install":
 			if err := runInstall(); err != nil {
 				log.Fatalf("Install failed: %v", err)
@@ -49,14 +46,30 @@ func main() {
 		}
 	}
 
-	cfg, err := config.Load()
+	fs := flag.NewFlagSet("service", flag.ExitOnError)
+	var flags commonFlags
+	addCommonFlags(fs, &flags)
+
+	var replace bool
+	fs.BoolVar(&replace, "r", false, "Replace existing secret-service provider")
+	fs.BoolVar(&replace, "replace", false, "Replace existing secret-service provider")
+
+	var busAddress string
+	fs.StringVar(&busAddress, "bus-address", "", "Custom D-Bus socket address (unix:path=...)")
+
+	fs.Parse(args)
+
+	cfg, err := flags.loadConfig()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if cfg.ShowVersion {
-		fmt.Printf("gopass-secret-service version %s\n", Version)
-		os.Exit(0)
+	// Apply service-specific flags
+	if replace {
+		cfg.Replace = true
+	}
+	if busAddress != "" {
+		cfg.BusAddress = busAddress
 	}
 
 	// Set up logging

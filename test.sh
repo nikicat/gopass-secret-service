@@ -4,7 +4,7 @@
 # Runs tests in an isolated D-Bus session with isolated gopass/GPG
 # Note: We don't use set -e because we want to continue on test failures
 
-BINARY="./gopass-secret-service"
+BINARY="./gopass-secret"
 TIMEOUT=5
 
 # Colors for output
@@ -183,12 +183,12 @@ setup_isolated_environment
 if [ ! -x "$BINARY" ]; then
     echo -e "${RED}Binary not found: $BINARY${NC}"
     echo "Building..."
-    go build -o "$BINARY" ./cmd/gopass-secret-service
+    go build -o "$BINARY" ./cmd/gopass-secret
 fi
 
 # Start the service
-echo "Starting gopass-secret-service..."
-$BINARY -d > "$LOG_FILE" 2>&1 &
+echo "Starting gopass-secret service..."
+$BINARY service -d > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 PID=$(cat "$PID_FILE")
 echo "Started with PID: $PID"

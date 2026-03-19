@@ -40,7 +40,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN go build -o gopass-secret-service ./cmd/gopass-secret-service
+RUN go build -o gopass-secret ./cmd/gopass-secret
 
 # Default command runs the tests
 CMD ["./test.sh"]

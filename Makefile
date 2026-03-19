@@ -1,6 +1,6 @@
 MAKEFLAGS += -j
 
-BINARY := gopass-secret-service
+BINARY := gopass-secret
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.Version=$(VERSION)"
 
@@ -17,7 +17,7 @@ DBUS_SERVICE_DIR := $(HOME)/.local/share/dbus-1/services
 all: build
 
 build:
-	go build $(LDFLAGS) -o $(BINARY) ./cmd/gopass-secret-service
+	go build $(LDFLAGS) -o $(BINARY) ./cmd/gopass-secret
 
 clean:
 	rm -f $(BINARY)
@@ -35,7 +35,7 @@ install: build
 	@echo "  D-Bus service: $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service"
 	@echo ""
 	@echo "To install as a systemd service, run:"
-	@echo "  $(BINDIR)/$(BINARY) install"
+	@echo "  $(BINDIR)/$(BINARY) service install"
 	@echo ""
 	@if ! echo "$$PATH" | grep -q "$(BINDIR)"; then \
 		echo "NOTE: $(BINDIR) is not in your PATH."; \
@@ -63,7 +63,7 @@ uninstall:
 	rm -f /usr/local/bin/$(BINARY)
 	rm -f $(DBUS_SERVICE_DIR)/org.freedesktop.secrets.service
 	@echo "Uninstalled $(BINARY)"
-	@echo "To remove the systemd service, run: gopass-secret-service uninstall"
+	@echo "To remove the systemd service, run: gopass-secret service uninstall"
 
 # Run checks and tests in parallel
 pre-commit: check test
@@ -106,11 +106,11 @@ fmt:
 
 # Development helpers
 run: build
-	./$(BINARY) -d
+	./$(BINARY) service -d
 
 # Show help
 help:
-	@echo "gopass-secret-service Makefile"
+	@echo "gopass-secret Makefile"
 	@echo ""
 	@echo "Targets:"
 	@echo "  build            Build the binary"
@@ -130,5 +130,5 @@ help:
 	@echo "  PREFIX           Installation prefix (default: ~/.local)"
 	@echo ""
 	@echo "Systemd service:"
-	@echo "  gopass-secret-service install    # Install systemd user service"
-	@echo "  gopass-secret-service uninstall  # Remove systemd user service"
+	@echo "  gopass-secret service install    # Install systemd user service"
+	@echo "  gopass-secret service uninstall  # Remove systemd user service"

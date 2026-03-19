@@ -1,7 +1,6 @@
 package config
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,17 +33,8 @@ type Config struct {
 	// where child processes like gpg-agent/pinentry still need the real session bus).
 	BusAddress string `yaml:"bus_address"`
 
-	// Verbose enables verbose logging
-	Verbose bool `yaml:"-"`
-
-	// Debug enables debug logging
-	Debug bool `yaml:"-"`
-
-	// ConfigPath is the path to the config file (set via CLI)
+	// ConfigPath is the resolved path to the config file
 	ConfigPath string `yaml:"-"`
-
-	// ShowVersion indicates whether to print version and exit
-	ShowVersion bool `yaml:"-"`
 }
 
 // DefaultConfig returns a new Config with default values
@@ -60,55 +50,25 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load loads configuration from CLI flags, environment, and config file
-func Load() (*Config, error) {
+// ResolveConfigPath resolves the config file path from: explicit value > env > default
+func ResolveConfigPath(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if envPath := os.Getenv("GOPASS_SECRET_SERVICE_CONFIG"); envPath != "" {
+		return envPath
+	}
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".config/gopass-secret-service/config.yaml")
+}
+
+// LoadFromFileAndEnv loads config: defaults → file → env vars. No flag parsing.
+func LoadFromFileAndEnv(configPath string) (*Config, error) {
 	cfg := DefaultConfig()
-
-	// Parse CLI flags first to get config path
-	configPath := flag.String("c", "", "Path to config file")
-	flag.StringVar(configPath, "config", "", "Path to config file")
-	storePath := flag.String("s", "", "GoPass store path")
-	flag.StringVar(storePath, "store-path", "", "GoPass store path")
-	prefix := flag.String("p", "", "Prefix for secret-service entries in gopass")
-	flag.StringVar(prefix, "prefix", "", "Prefix for secret-service entries in gopass")
-	verbose := flag.Bool("v", false, "Enable verbose logging")
-	flag.BoolVar(verbose, "verbose", false, "Enable verbose logging")
-	debug := flag.Bool("d", false, "Enable debug logging")
-	flag.BoolVar(debug, "debug", false, "Enable debug logging")
-	replace := flag.Bool("r", false, "Replace existing secret-service provider")
-	flag.BoolVar(replace, "replace", false, "Replace existing secret-service provider")
-	busAddress := flag.String("bus-address", "", "Custom D-Bus socket address (unix:path=...)")
-	version := flag.Bool("version", false, "Print version and exit")
-	help := flag.Bool("h", false, "Show help message")
-	flag.BoolVar(help, "help", false, "Show help message")
-
-	flag.Parse()
-
-	if *help {
-		printUsage()
-		os.Exit(0)
-	}
-
-	cfg.ShowVersion = *version
-	cfg.Verbose = *verbose
-	cfg.Debug = *debug
-	if *replace {
-		cfg.Replace = true
-	}
-
-	// Determine config file path
-	if *configPath != "" {
-		cfg.ConfigPath = *configPath
-	} else if envPath := os.Getenv("GOPASS_SECRET_SERVICE_CONFIG"); envPath != "" {
-		cfg.ConfigPath = envPath
-	} else {
-		homeDir, _ := os.UserHomeDir()
-		cfg.ConfigPath = filepath.Join(homeDir, ".config/gopass-secret-service/config.yaml")
-	}
+	cfg.ConfigPath = configPath
 
 	// Load config file if it exists
 	if err := cfg.loadFromFile(); err != nil {
-		// Only error if the file exists but can't be read
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("loading config file: %w", err)
 		}
@@ -117,27 +77,9 @@ func Load() (*Config, error) {
 	// Apply environment variables (override config file)
 	cfg.applyEnv()
 
-	// Apply CLI flags (override everything)
-	if *storePath != "" {
-		cfg.StorePath = *storePath
-	}
-	if *prefix != "" {
-		cfg.Prefix = *prefix
-	}
-	if *busAddress != "" {
-		cfg.BusAddress = *busAddress
-	}
-
 	// Expand ~ in paths
 	cfg.StorePath = expandPath(cfg.StorePath)
 	cfg.LogFile = expandPath(cfg.LogFile)
-
-	// Set log level based on flags
-	if cfg.Debug {
-		cfg.LogLevel = "debug"
-	} else if cfg.Verbose {
-		cfg.LogLevel = "info"
-	}
 
 	return cfg, nil
 }
@@ -184,32 +126,4 @@ func expandPath(path string) string {
 		return filepath.Join(homeDir, path[1:])
 	}
 	return path
-}
-
-func printUsage() {
-	fmt.Println(`gopass-secret-service - D-Bus Secret Service backed by GoPass
-
-Usage:
-  gopass-secret-service [options]
-
-Options:
-  -c, --config PATH        Path to config file (default: ~/.config/gopass-secret-service/config.yaml)
-  -s, --store-path PATH    GoPass store path (default: ~/.local/share/gopass/stores/root)
-  -p, --prefix PREFIX      Prefix for secret-service entries in gopass (default: "secret-service")
-  -v, --verbose            Enable verbose logging
-  -d, --debug              Enable debug logging
-  -r, --replace            Replace existing secret-service provider
-      --bus-address ADDR   Custom D-Bus socket address (unix:path=...)
-      --version            Print version and exit
-  -h, --help               Show help message
-
-Environment variables:
-  GOPASS_SECRET_SERVICE_CONFIG             Path to config file
-  GOPASS_SECRET_SERVICE_STORE_PATH         GoPass store path
-  GOPASS_SECRET_SERVICE_PREFIX             Prefix for secret-service entries
-  GOPASS_SECRET_SERVICE_DEFAULT_COLLECTION Default collection name
-  GOPASS_SECRET_SERVICE_LOG_LEVEL          Log level (debug, info, warn, error)
-  GOPASS_SECRET_SERVICE_LOG_FILE           Log file path
-  GOPASS_SECRET_SERVICE_REPLACE            Replace existing provider (true/1)
-  GOPASS_SECRET_SERVICE_BUS_ADDRESS        Custom D-Bus socket address`)
 }

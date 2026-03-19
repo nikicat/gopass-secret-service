@@ -66,13 +66,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags="-s -w" -o gopass-secret-service-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/gopass-secret-service
+          go build -ldflags="-s -w" -o gopass-secret-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/gopass-secret
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gopass-secret-service-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: gopass-secret-service-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: gopass-secret-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: gopass-secret-${{ matrix.goos }}-${{ matrix.goarch }}
 
   verify:
     name: Verify
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t gopass-secret-service-test .
+        run: docker build -t gopass-secret-test .
 
       - name: Run integration tests
-        run: docker run --rm gopass-secret-service-test
+        run: docker run --rm gopass-secret-test
