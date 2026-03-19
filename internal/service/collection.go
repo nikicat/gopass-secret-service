@@ -348,6 +348,9 @@ func (c *Collection) SearchItems(attributes map[string]string) ([]dbus.ObjectPat
 
 	paths := make([]dbus.ObjectPath, 0, len(items))
 	for _, item := range items {
+		if _, err := c.svc.items.GetOrCreate(c.name, item.ID); err != nil {
+			continue
+		}
 		paths = append(paths, dbtypes.ItemPath(c.name, item.ID))
 	}
 
