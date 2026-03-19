@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,57 +9,41 @@ import (
 	"text/tabwriter"
 	"unicode/utf8"
 
-	"github.com/nikicat/gopass-secret-service/internal/store"
+	"github.com/godbus/dbus/v5"
+	dbustypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
 const defaultMaxWidth = 30
 
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	var flags commonFlags
-	addCommonFlags(fs, &flags)
 	maxWidth := fs.Int("max-width", defaultMaxWidth, "Max attribute value width (0 = unlimited)")
 	fs.Parse(args)
 
-	cfg, err := flags.loadConfig()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-
-	ctx := context.Background()
-	s, err := store.NewGopassStore(ctx, cfg.Prefix)
-	if err != nil {
-		log.Fatalf("Failed to open gopass store: %v", err)
-	}
-	defer s.Close(ctx)
-
-	// Get collections, optionally filtered by positional arg
 	var filterCollection string
 	if fs.NArg() > 0 {
 		filterCollection = fs.Arg(0)
 	}
 
-	collections, err := s.Collections(ctx)
+	conn, err := dbus.SessionBus()
 	if err != nil {
-		log.Fatalf("Failed to list collections: %v", err)
+		log.Fatalf("Failed to connect to session bus: %v", err)
+	}
+	defer conn.Close()
+
+	svc := conn.Object(dbustypes.ServiceName, dbustypes.ServicePath)
+
+	// Get collection paths from the Collections property
+	variant, err := svc.GetProperty(dbustypes.SecretServiceInterface + ".Collections")
+	if err != nil {
+		log.Fatalf("Failed to get collections: %v", err)
 	}
 
-	if filterCollection != "" {
-		found := false
-		for _, c := range collections {
-			if c == filterCollection {
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Collection not found: %s\n", filterCollection)
-			os.Exit(1)
-		}
-		collections = []string{filterCollection}
+	collPaths, ok := variant.Value().([]dbus.ObjectPath)
+	if !ok {
+		log.Fatalf("Unexpected Collections property type: %T", variant.Value())
 	}
 
-	// Collect all items and discover unique attribute keys
 	type row struct {
 		collection string
 		id         string
@@ -71,30 +54,89 @@ func runList(args []string) {
 	var rows []row
 	attrKeys := make(map[string]bool)
 
-	for _, coll := range collections {
-		items, err := s.Items(ctx, coll)
+	for _, collPath := range collPaths {
+		collName, err := dbustypes.ParseCollectionPath(collPath)
 		if err != nil {
-			log.Printf("Warning: failed to list items in %s: %v", coll, err)
+			log.Printf("Warning: invalid collection path %s: %v", collPath, err)
 			continue
 		}
 
-		for _, id := range items {
-			item, err := s.GetItem(ctx, coll, id)
+		if filterCollection != "" && collName != filterCollection {
+			continue
+		}
+
+		collObj := conn.Object(dbustypes.ServiceName, collPath)
+
+		// Get item paths from the collection's Items property
+		itemsVariant, err := collObj.GetProperty(dbustypes.CollectionInterface + ".Items")
+		if err != nil {
+			log.Printf("Warning: failed to get items for %s: %v", collName, err)
+			continue
+		}
+
+		itemPaths, ok := itemsVariant.Value().([]dbus.ObjectPath)
+		if !ok {
+			log.Printf("Warning: unexpected Items property type for %s: %T", collName, itemsVariant.Value())
+			continue
+		}
+
+		for _, itemPath := range itemPaths {
+			_, itemID, err := dbustypes.ParseItemPath(itemPath)
 			if err != nil {
-				log.Printf("Warning: failed to get item %s/%s: %v", coll, id, err)
+				log.Printf("Warning: invalid item path %s: %v", itemPath, err)
 				continue
 			}
 
-			for k := range item.Attributes {
+			itemObj := conn.Object(dbustypes.ServiceName, itemPath)
+
+			// Get all item properties at once
+			var allProps map[string]dbus.Variant
+			err = itemObj.Call("org.freedesktop.DBus.Properties.GetAll", 0, dbustypes.ItemInterface).Store(&allProps)
+			if err != nil {
+				log.Printf("Warning: failed to get properties for %s: %v", itemPath, err)
+				continue
+			}
+
+			label := ""
+			if v, ok := allProps["Label"]; ok {
+				if s, ok := v.Value().(string); ok {
+					label = s
+				}
+			}
+
+			attrs := map[string]string{}
+			if v, ok := allProps["Attributes"]; ok {
+				if a, ok := v.Value().(map[string]string); ok {
+					attrs = a
+				}
+			}
+
+			for k := range attrs {
 				attrKeys[k] = true
 			}
 
 			rows = append(rows, row{
-				collection: coll,
-				id:         id,
-				label:      item.Label,
-				attrs:      item.Attributes,
+				collection: collName,
+				id:         itemID,
+				label:      label,
+				attrs:      attrs,
 			})
+		}
+	}
+
+	if filterCollection != "" && len(rows) == 0 {
+		// Check if the collection existed at all
+		found := false
+		for _, collPath := range collPaths {
+			name, _ := dbustypes.ParseCollectionPath(collPath)
+			if name == filterCollection {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Collection not found: %s\n", filterCollection)
+			os.Exit(1)
 		}
 	}
 
