@@ -19,9 +19,7 @@ const defaultMaxWidth = 30
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	maxWidth := fs.Int("max-width", defaultMaxWidth, "Max attribute value width (0 = unlimited)")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
-	}
+	mustParse(fs, args)
 
 	var filterCollection string
 	if fs.NArg() > 0 {

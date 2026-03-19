@@ -32,6 +32,12 @@ func addCommonFlags(fs *flag.FlagSet, f *commonFlags) {
 	fs.BoolVar(&f.debug, "debug", false, "Enable debug logging")
 }
 
+func mustParse(fs *flag.FlagSet, args []string) {
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+}
+
 func (f *commonFlags) loadConfig() (*config.Config, error) {
 	resolvedPath := config.ResolveConfigPath(f.configPath)
 	cfg, err := config.LoadFromFileAndEnv(resolvedPath)

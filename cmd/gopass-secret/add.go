@@ -43,9 +43,7 @@ func runAdd(args []string) {
 		attrFlags[attr.Name] = fs.String(attr.Name, "", hint)
 	}
 
-	if err := fs.Parse(args[1:]); err != nil {
-		os.Exit(1)
-	}
+	mustParse(fs, args[1:])
 
 	if *label == "" {
 		log.Fatal("--label is required")
