@@ -71,6 +71,8 @@ func main() {
 		runConfig(os.Args[2:])
 	case "add":
 		runAdd(os.Args[2:])
+	case "get":
+		runGet(os.Args[2:])
 	case "list", "ls":
 		runList(os.Args[2:])
 	case "version", "--version":
@@ -94,6 +96,7 @@ Commands:
   service        Run the D-Bus Secret Service daemon
   config         Show configuration
   add            Add a secret to the store
+  get            Look up a secret by type and attributes
   list, ls       List secrets with attributes
   version        Print version
   help           Show this help
