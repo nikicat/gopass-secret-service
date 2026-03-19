@@ -57,7 +57,9 @@ func runService(args []string) {
 	var busAddress string
 	fs.StringVar(&busAddress, "bus-address", "", "Custom D-Bus socket address (unix:path=...)")
 
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
 
 	cfg, err := flags.loadConfig()
 	if err != nil {

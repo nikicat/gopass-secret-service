@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
+
 	dbustypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 )
 
@@ -18,7 +19,9 @@ const defaultMaxWidth = 30
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	maxWidth := fs.Int("max-width", defaultMaxWidth, "Max attribute value width (0 = unlimited)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
 
 	var filterCollection string
 	if fs.NArg() > 0 {

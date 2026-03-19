@@ -17,6 +17,8 @@ linters:
         - G117  # Struct field "Secret" is domain data, not a credential
         - G204  # Subprocess args are controlled (systemctl, dbus-daemon)
         - G306  # Systemd unit files should be world-readable (0644)
+        - G705  # CLI tool writes user args to stderr, not a web XSS vector
+        - G706  # CLI tool logs user args, not a log-injection vector
   exclusions:
     generated: lax
     presets:

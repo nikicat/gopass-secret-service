@@ -6,8 +6,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/nikicat/gopass-secret-service/internal/config"
 	"gopkg.in/yaml.v3"
+
+	"github.com/nikicat/gopass-secret-service/internal/config"
 )
 
 func runConfig(args []string) {
@@ -32,7 +33,9 @@ func runConfigShow(args []string) {
 	fs := flag.NewFlagSet("config show", flag.ExitOnError)
 	var flags commonFlags
 	addCommonFlags(fs, &flags)
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
 
 	cfg, err := flags.loadConfig()
 	if err != nil {
@@ -64,7 +67,9 @@ func runConfigPath(args []string) {
 	fs := flag.NewFlagSet("config path", flag.ExitOnError)
 	var flags commonFlags
 	addCommonFlags(fs, &flags)
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
 
 	resolvedPath := config.ResolveConfigPath(flags.configPath)
 	fmt.Println(resolvedPath)

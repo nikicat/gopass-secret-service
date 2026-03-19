@@ -9,9 +9,10 @@ import (
 	"strings"
 
 	"github.com/godbus/dbus/v5"
+	"golang.org/x/term"
+
 	dbustypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 	"github.com/nikicat/gopass-secret-service/internal/schema"
-	"golang.org/x/term"
 )
 
 func runAdd(args []string) {
@@ -42,7 +43,9 @@ func runAdd(args []string) {
 		attrFlags[attr.Name] = fs.String(attr.Name, "", hint)
 	}
 
-	fs.Parse(args[1:])
+	if err := fs.Parse(args[1:]); err != nil {
+		os.Exit(1)
+	}
 
 	if *label == "" {
 		log.Fatal("--label is required")
@@ -143,7 +146,7 @@ func createItem(collection, label string, attrs map[string]string, secret []byte
 	// Properties
 	props := map[string]dbus.Variant{
 		"org.freedesktop.Secret.Item.Label":      dbus.MakeVariant(label),
-		"org.freedesktop.Secret.Item.Attributes":  dbus.MakeVariant(attrs),
+		"org.freedesktop.Secret.Item.Attributes": dbus.MakeVariant(attrs),
 	}
 
 	// Secret struct: (session, params, value, content-type)
