@@ -251,6 +251,9 @@ func (s *Service) SearchItems(attributes map[string]string) ([]dbus.ObjectPath, 
 		isLocked := collData != nil && collData.Locked
 
 		for _, item := range items {
+			if _, err := s.items.GetOrCreate(collName, item.ID); err != nil {
+				continue
+			}
 			path := dbtypes.ItemPath(collName, item.ID)
 			if isLocked {
 				locked = append(locked, path)
