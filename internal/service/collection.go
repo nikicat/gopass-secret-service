@@ -7,20 +7,26 @@ import (
 	"sync"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/godbus/dbus/v5/prop"
 	"github.com/google/uuid"
 
 	dbtypes "github.com/nikicat/gopass-secret-service/internal/dbus"
 	"github.com/nikicat/gopass-secret-service/internal/store"
 )
 
-// Collection represents a D-Bus Secret Service collection
+// Collection represents a D-Bus Secret Service collection.
+//
+// Properties (Items, Label, Locked, Created, Modified) are served by
+// collectionPropsHandler, which reads from the store on every Get rather than
+// caching values at export time. PropertiesChanged signals are still emitted
+// from mutation paths (CreateItem, setLabel) so subscribers get notified, but
+// the cache-and-emit pattern would have been a source of bugs whenever the
+// store mutated through any path other than D-Bus (e.g. external `gopass`
+// CLI, or items that existed on disk before the service started).
 type Collection struct {
-	path  dbus.ObjectPath
-	name  string
-	svc   *Service
-	mu    sync.RWMutex
-	props *prop.Properties
+	path dbus.ObjectPath
+	name string
+	svc  *Service
+	mu   sync.RWMutex
 }
 
 // NewCollection creates a new Collection instance
@@ -30,6 +36,95 @@ func NewCollection(svc *Service, name string) *Collection {
 		name: name,
 		svc:  svc,
 	}
+}
+
+// collectionPropsHandler implements org.freedesktop.DBus.Properties for the
+// org.freedesktop.Secret.Collection interface by reading from the store on
+// every access. Replaces godbus's prop.Export, which caches values at export
+// time and can only refresh them via SetMust — that would be wrong here
+// because the underlying gopass store can mutate outside of D-Bus (e.g. via
+// the gopass CLI or items that pre-existed on disk), and we have no hook to
+// observe those changes.
+type collectionPropsHandler struct {
+	coll *Collection
+}
+
+func (h *collectionPropsHandler) Get(iface, property string) (dbus.Variant, *dbus.Error) {
+	if iface != dbtypes.CollectionInterface {
+		return dbus.Variant{}, ErrUnsupported("unknown interface: " + iface)
+	}
+	switch property {
+	case "Items":
+		return dbus.MakeVariant(h.coll.getItemPaths()), nil
+	case "Label", "Locked", "Created", "Modified":
+		// Fall through to collection data lookup below.
+	default:
+		return dbus.Variant{}, ErrUnsupported("unknown property: " + property)
+	}
+
+	collData, _ := h.coll.svc.store.GetCollection(context.Background(), h.coll.name)
+	switch property {
+	case "Label":
+		if collData == nil {
+			return dbus.MakeVariant(h.coll.name), nil
+		}
+		return dbus.MakeVariant(collData.Label), nil
+	case "Locked":
+		if collData == nil {
+			return dbus.MakeVariant(false), nil
+		}
+		return dbus.MakeVariant(collData.Locked), nil
+	case "Created":
+		if collData == nil {
+			return dbus.MakeVariant(uint64(0)), nil
+		}
+		return dbus.MakeVariant(uint64(collData.Created.Unix())), nil
+	case "Modified":
+		if collData == nil {
+			return dbus.MakeVariant(uint64(0)), nil
+		}
+		return dbus.MakeVariant(uint64(collData.Modified.Unix())), nil
+	}
+	// Unreachable; kept to satisfy the compiler.
+	return dbus.Variant{}, ErrUnsupported("unknown property: " + property)
+}
+
+func (h *collectionPropsHandler) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
+	if iface != dbtypes.CollectionInterface {
+		return nil, ErrUnsupported("unknown interface: " + iface)
+	}
+	collData, _ := h.coll.svc.store.GetCollection(context.Background(), h.coll.name)
+	label := h.coll.name
+	locked := false
+	created := uint64(0)
+	modified := uint64(0)
+	if collData != nil {
+		label = collData.Label
+		locked = collData.Locked
+		created = uint64(collData.Created.Unix())
+		modified = uint64(collData.Modified.Unix())
+	}
+	return map[string]dbus.Variant{
+		"Items":    dbus.MakeVariant(h.coll.getItemPaths()),
+		"Label":    dbus.MakeVariant(label),
+		"Locked":   dbus.MakeVariant(locked),
+		"Created":  dbus.MakeVariant(created),
+		"Modified": dbus.MakeVariant(modified),
+	}, nil
+}
+
+func (h *collectionPropsHandler) Set(iface, property string, value dbus.Variant) *dbus.Error {
+	if iface != dbtypes.CollectionInterface {
+		return ErrUnsupported("unknown interface: " + iface)
+	}
+	if property != "Label" {
+		return ErrUnsupported("property is read-only: " + property)
+	}
+	label, ok := value.Value().(string)
+	if !ok {
+		return ErrUnsupported("invalid label type")
+	}
+	return h.coll.setLabel(label)
 }
 
 // Path returns the collection's D-Bus path
@@ -54,74 +149,12 @@ func (c *Collection) Export() error {
 	}
 	log.Printf("Collection.Export: interface exported")
 
-	log.Printf("Collection.Export: getting collection data...")
-	// Get collection data for initial property values
-	ctx := context.Background()
-	collData, err := c.svc.store.GetCollection(ctx, c.name)
-	if err != nil {
-		log.Printf("Collection.Export: failed to get collection data: %v", err)
-	}
-	log.Printf("Collection.Export: got collection data")
-	label := c.name
-	locked := false
-	created := uint64(0)
-	modified := uint64(0)
-	if collData != nil {
-		label = collData.Label
-		locked = collData.Locked
-		created = uint64(collData.Created.Unix())
-		modified = uint64(collData.Modified.Unix())
-	}
-
-	log.Printf("Collection.Export: getting item paths...")
-	// Get items for initial property value
-	items := c.getItemPaths()
-	log.Printf("Collection.Export: got %d item paths", len(items))
-
-	// Set up properties
-	propsSpec := map[string]map[string]*prop.Prop{
-		dbtypes.CollectionInterface: {
-			"Items": {
-				Value:    items,
-				Writable: false,
-				Emit:     prop.EmitTrue,
-			},
-			"Label": {
-				Value:    label,
-				Writable: true,
-				Emit:     prop.EmitTrue,
-				Callback: func(ch *prop.Change) *dbus.Error {
-					newLabel, ok := ch.Value.(string)
-					if !ok {
-						return ErrUnsupported("invalid label type")
-					}
-					return c.setLabel(newLabel)
-				},
-			},
-			"Locked": {
-				Value:    locked,
-				Writable: false,
-				Emit:     prop.EmitTrue,
-			},
-			"Created": {
-				Value:    created,
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-			"Modified": {
-				Value:    modified,
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-		},
-	}
-
-	props, err := prop.Export(conn, c.path, propsSpec)
-	if err != nil {
+	// Live properties handler — reads from the store on every Get rather
+	// than caching at export time. See type comment.
+	if err := conn.Export(&collectionPropsHandler{coll: c}, c.path, "org.freedesktop.DBus.Properties"); err != nil {
 		conn.Export(nil, c.path, dbtypes.CollectionInterface)
 		return err
 	}
-	c.props = props
 
 	// Export introspection - must include Properties interface for clients
 	introXML := `<node>
@@ -200,60 +233,8 @@ func (c *Collection) ExportAtPath(path dbus.ObjectPath) error {
 		return err
 	}
 
-	// Get collection data for property values
-	ctx := context.Background()
-	collData, _ := c.svc.store.GetCollection(ctx, c.name)
-	label := c.name
-	locked := false
-	created := uint64(0)
-	modified := uint64(0)
-	if collData != nil {
-		label = collData.Label
-		locked = collData.Locked
-		created = uint64(collData.Created.Unix())
-		modified = uint64(collData.Modified.Unix())
-	}
-	items := c.getItemPaths()
-
-	// Set up properties at the alias path
-	propsSpec := map[string]map[string]*prop.Prop{
-		dbtypes.CollectionInterface: {
-			"Items": {
-				Value:    items,
-				Writable: false,
-				Emit:     prop.EmitTrue,
-			},
-			"Label": {
-				Value:    label,
-				Writable: true,
-				Emit:     prop.EmitTrue,
-				Callback: func(ch *prop.Change) *dbus.Error {
-					newLabel, ok := ch.Value.(string)
-					if !ok {
-						return ErrUnsupported("invalid label type")
-					}
-					return c.setLabel(newLabel)
-				},
-			},
-			"Locked": {
-				Value:    locked,
-				Writable: false,
-				Emit:     prop.EmitTrue,
-			},
-			"Created": {
-				Value:    created,
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-			"Modified": {
-				Value:    modified,
-				Writable: false,
-				Emit:     prop.EmitFalse,
-			},
-		},
-	}
-
-	if _, err := prop.Export(conn, path, propsSpec); err != nil {
+	// Same live properties handler as the canonical path uses.
+	if err := conn.Export(&collectionPropsHandler{coll: c}, path, "org.freedesktop.DBus.Properties"); err != nil {
 		conn.Export(nil, path, dbtypes.CollectionInterface)
 		return err
 	}
@@ -348,6 +329,7 @@ func (c *Collection) SearchItems(attributes map[string]string) ([]dbus.ObjectPat
 
 	paths := make([]dbus.ObjectPath, 0, len(items))
 	for _, item := range items {
+		c.svc.items.EnsureExported(c.name, item.ID)
 		paths = append(paths, dbtypes.ItemPath(c.name, item.ID))
 	}
 
@@ -428,6 +410,13 @@ func (c *Collection) CreateItem(properties map[string]dbus.Variant, secret dbtyp
 			}
 			itemID = existingItem.ID
 
+			// Ensure the item is exported on D-Bus. Same reasoning as the
+			// replace=false branch below: a successful prior CreateItem only
+			// guarantees the item lives in the store, not that an *Item proxy
+			// is bound to its D-Bus path, since across a service restart the
+			// in-memory ItemManager is empty.
+			c.svc.items.EnsureExported(c.name, itemID)
+
 			// Emit ItemChanged
 			itemPath := dbtypes.ItemPath(c.name, itemID)
 			c.svc.emitItemChanged(c.name, itemPath)
@@ -479,6 +468,9 @@ func (c *Collection) setLabel(label string) *dbus.Error {
 		return ErrUnsupported(err.Error())
 	}
 
+	c.emitPropertiesChanged(map[string]dbus.Variant{
+		"Label": dbus.MakeVariant(label),
+	})
 	c.svc.emitCollectionChanged(c.path)
 	return nil
 }
@@ -505,15 +497,27 @@ func (c *Collection) getItemPaths() []dbus.ObjectPath {
 
 	paths := make([]dbus.ObjectPath, 0, len(items))
 	for _, id := range items {
+		c.svc.items.EnsureExported(c.name, id)
 		paths = append(paths, dbtypes.ItemPath(c.name, id))
 	}
 	return paths
 }
 
+// refreshItems emits PropertiesChanged for the Items property. Subscribers that
+// cache the property locally (e.g. seahorse) re-fetch it on the signal; we no
+// longer hold the value ourselves since collectionPropsHandler reads live.
 func (c *Collection) refreshItems() {
-	if c.props != nil {
-		c.props.SetMust(dbtypes.CollectionInterface, "Items", c.getItemPaths())
-	}
+	c.emitPropertiesChanged(map[string]dbus.Variant{
+		"Items": dbus.MakeVariant(c.getItemPaths()),
+	})
+}
+
+// emitPropertiesChanged sends org.freedesktop.DBus.Properties.PropertiesChanged
+// for this collection. Used by mutation paths (CreateItem, setLabel) where we
+// know exactly which keys changed.
+func (c *Collection) emitPropertiesChanged(changed map[string]dbus.Variant) {
+	c.svc.conn.Emit(c.path, "org.freedesktop.DBus.Properties.PropertiesChanged",
+		dbtypes.CollectionInterface, changed, []string{})
 }
 
 // CollectionManager manages collections for the service

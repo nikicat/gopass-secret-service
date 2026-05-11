@@ -612,3 +612,311 @@ func containsPath(paths []dbus.ObjectPath, target dbus.ObjectPath) bool {
 	}
 	return false
 }
+
+// openPlainSession opens a "plain" (no-encryption) session over D-Bus and
+// returns its path. Test helper used by D-Bus-level regression tests.
+func openPlainSession(t *testing.T, svc *Service) dbus.ObjectPath {
+	t.Helper()
+	svcObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.ServicePath)
+	var output dbus.Variant
+	var sessionPath dbus.ObjectPath
+	if err := svcObj.Call(dbtypes.SecretServiceInterface+".OpenSession", 0,
+		"plain", dbus.MakeVariant("")).Store(&output, &sessionPath); err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	return sessionPath
+}
+
+// TestSearchItems_ExportsResultsOverDBus is the regression test for the bug
+// where SearchItems returned paths derived from the on-disk store but did NOT
+// register an Item proxy at those paths. Any subsequent Item.GetSecret call
+// then failed with "Object does not implement the interface
+// 'org.freedesktop.Secret.Item'" because the ItemManager's in-memory set —
+// the source of D-Bus exports — was disjoint from the store after a service
+// restart, an external write, or a CreateItem(replace=true).
+func TestSearchItems_ExportsResultsOverDBus(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	const itemID = "i775990bb890547499e8234803760a350"
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		itemID: {
+			ID:          itemID,
+			Label:       "kubelogin token cache",
+			Secret:      []byte("eyJhbGc-fake-token"),
+			ContentType: "text/plain",
+			Attributes: map[string]string{
+				"service":  "kubelogin",
+				"username": "kubelogin/tokencache/abc",
+			},
+		},
+	}
+	ms.mu.Unlock()
+
+	// Deliberately DO NOT call svc.items.GetOrCreate. This is the
+	// post-restart / external-write state: the store has the item, but the
+	// ItemManager does not. The fix in SearchItems must close that gap.
+
+	sessionPath := openPlainSession(t, svc)
+	svcObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.ServicePath)
+
+	// Service.SearchItems — discover the path.
+	var unlocked, locked []dbus.ObjectPath
+	if err := svcObj.Call(dbtypes.SecretServiceInterface+".SearchItems", 0,
+		map[string]string{"service": "kubelogin"}).Store(&unlocked, &locked); err != nil {
+		t.Fatalf("SearchItems: %v", err)
+	}
+	all := append(append([]dbus.ObjectPath{}, unlocked...), locked...)
+	wantPath := dbtypes.ItemPath("default", itemID)
+	if !containsPath(all, wantPath) {
+		t.Fatalf("SearchItems result %v does not contain %s", all, wantPath)
+	}
+
+	// Item.GetSecret over D-Bus — the failing call from the original bug.
+	// Without the fix this returns
+	//   org.freedesktop.DBus.Error.UnknownInterface: Object does not implement
+	//   the interface 'org.freedesktop.Secret.Item'
+	itemObj := svc.conn.Object("org.freedesktop.secrets", wantPath)
+	var secret dbtypes.Secret
+	if err := itemObj.Call(dbtypes.ItemInterface+".GetSecret", 0, sessionPath).Store(&secret); err != nil {
+		t.Fatalf("Item.GetSecret over D-Bus: %v\n(the item path was returned by SearchItems but never bound to its D-Bus interface — bug regressed)", err)
+	}
+
+	if string(secret.Value) != "eyJhbGc-fake-token" {
+		t.Errorf("secret.Value = %q, want %q", string(secret.Value), "eyJhbGc-fake-token")
+	}
+	if secret.ContentType != "text/plain" {
+		t.Errorf("secret.ContentType = %q, want %q", secret.ContentType, "text/plain")
+	}
+}
+
+// TestCreateItem_ReplaceTrueExportsExistingItem covers the original kubelogin
+// failure path: a client calls CreateItem(replace=true) for attributes that
+// match an item already in the store (created earlier and persisted via _meta,
+// but with the ItemManager empty after a service restart). The replace=true
+// branch in Collection.CreateItem updates the store and, before the fix, did
+// NOT register an Item proxy at the returned path — so the very next
+// Item.GetSecret would fail with UnknownInterface.
+func TestCreateItem_ReplaceTrueExportsExistingItem(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	const itemID = "i333333333333333333333333cccccccc"
+	const oldSecret = "old-token"
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		itemID: {
+			ID:          itemID,
+			Label:       "kubelogin token cache",
+			Secret:      []byte(oldSecret),
+			ContentType: "text/plain",
+			Attributes: map[string]string{
+				"service":  "kubelogin",
+				"username": "kubelogin/tokencache/abc",
+			},
+		},
+	}
+	ms.mu.Unlock()
+
+	sessionPath := openPlainSession(t, svc)
+
+	// CreateItem(replace=true) with matching attributes → hits the
+	// existingItem-with-replace branch in Collection.CreateItem.
+	const newSecret = "new-rotated-token"
+	collObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.CollectionPath("default"))
+	properties := map[string]dbus.Variant{
+		"org.freedesktop.Secret.Item.Label": dbus.MakeVariant("kubelogin token cache"),
+		"org.freedesktop.Secret.Item.Attributes": dbus.MakeVariant(map[string]string{
+			"service":  "kubelogin",
+			"username": "kubelogin/tokencache/abc",
+		}),
+	}
+	secretIn := dbtypes.Secret{
+		Session:     sessionPath,
+		Parameters:  []byte{},
+		Value:       []byte(newSecret),
+		ContentType: "text/plain",
+	}
+	var gotPath, promptPath dbus.ObjectPath
+	if err := collObj.Call(dbtypes.CollectionInterface+".CreateItem", 0,
+		properties, secretIn, true).Store(&gotPath, &promptPath); err != nil {
+		t.Fatalf("CreateItem: %v", err)
+	}
+	wantPath := dbtypes.ItemPath("default", itemID)
+	if gotPath != wantPath {
+		t.Fatalf("CreateItem returned %s, want %s", gotPath, wantPath)
+	}
+
+	// Without the fix this returns
+	// "Object does not implement the interface 'org.freedesktop.Secret.Item'".
+	itemObj := svc.conn.Object("org.freedesktop.secrets", gotPath)
+	var secret dbtypes.Secret
+	if err := itemObj.Call(dbtypes.ItemInterface+".GetSecret", 0, sessionPath).Store(&secret); err != nil {
+		t.Fatalf("Item.GetSecret over D-Bus after CreateItem(replace=true): %v\n(replace branch did not export the item — bug regressed)", err)
+	}
+	if string(secret.Value) != newSecret {
+		t.Errorf("secret.Value = %q, want %q (rotated value should be returned)", string(secret.Value), newSecret)
+	}
+}
+
+// TestCollectionItemsProperty_LiveReadsStore covers the cached-property bug:
+// Collection.Items used to be set from prop.Export at construction time and
+// only refreshed on add/delete events, so items added to the store *between*
+// service start and the property read (e.g. external `gopass insert`, or any
+// item not picked up by ExportAllItems) were invisible. With the live
+// collectionPropsHandler the property reads from the store on every Get.
+func TestCollectionItemsProperty_LiveReadsStore(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	// newTestService starts the service before any items exist in the store.
+	// Now add one externally, the way an external CLI or a pre-existing
+	// on-disk file would surface.
+	const itemID = "i222222222222222222222222bbbbbbbb"
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		itemID: {
+			ID:          itemID,
+			Label:       "props secret",
+			Secret:      []byte("v"),
+			ContentType: "text/plain",
+			Attributes:  map[string]string{},
+		},
+	}
+	ms.mu.Unlock()
+
+	collObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.CollectionPath("default"))
+	v, err := collObj.GetProperty(dbtypes.CollectionInterface + ".Items")
+	if err != nil {
+		t.Fatalf("GetProperty Items: %v", err)
+	}
+	paths, ok := v.Value().([]dbus.ObjectPath)
+	if !ok {
+		t.Fatalf("Items is not []ObjectPath: %T", v.Value())
+	}
+	wantPath := dbtypes.ItemPath("default", itemID)
+	if !containsPath(paths, wantPath) {
+		t.Fatalf("Items property %v does not contain %s\n(property was cached at Export and never refreshed — stale-cache bug regressed)", paths, wantPath)
+	}
+}
+
+// TestCollectionLabelProperty_LiveReadsStore guards the same staleness fix
+// for the Label property: if the store mutates outside of D-Bus, Label must
+// reflect the new value on the next read.
+func TestCollectionLabelProperty_LiveReadsStore(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	// Service starts with the default collection auto-created with empty
+	// label data. Mutate the label externally.
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Updated Externally"}
+	ms.mu.Unlock()
+
+	collObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.CollectionPath("default"))
+	v, err := collObj.GetProperty(dbtypes.CollectionInterface + ".Label")
+	if err != nil {
+		t.Fatalf("GetProperty Label: %v", err)
+	}
+	label, ok := v.Value().(string)
+	if !ok {
+		t.Fatalf("Label is not a string: %T", v.Value())
+	}
+	if label != "Updated Externally" {
+		t.Errorf("Label = %q, want %q (cached pre-mutation value returned — stale-cache bug regressed)", label, "Updated Externally")
+	}
+}
+
+// TestCollectionSearchItems_ExportsResultsOverDBus covers the same regression
+// at the Collection.SearchItems entry point — the per-collection variant, used
+// by clients that have already located a collection and are searching within
+// it.
+func TestCollectionSearchItems_ExportsResultsOverDBus(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	const itemID = "i111111111111111111111111aaaaaaaa"
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		itemID: {
+			ID:          itemID,
+			Label:       "secret",
+			Secret:      []byte("value"),
+			ContentType: "text/plain",
+			Attributes:  map[string]string{"app": "x"},
+		},
+	}
+	ms.mu.Unlock()
+
+	sessionPath := openPlainSession(t, svc)
+
+	collObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.CollectionPath("default"))
+	var paths []dbus.ObjectPath
+	if err := collObj.Call(dbtypes.CollectionInterface+".SearchItems", 0,
+		map[string]string{"app": "x"}).Store(&paths); err != nil {
+		t.Fatalf("Collection.SearchItems: %v", err)
+	}
+	wantPath := dbtypes.ItemPath("default", itemID)
+	if !containsPath(paths, wantPath) {
+		t.Fatalf("Collection.SearchItems result %v does not contain %s", paths, wantPath)
+	}
+
+	itemObj := svc.conn.Object("org.freedesktop.secrets", wantPath)
+	var secret dbtypes.Secret
+	if err := itemObj.Call(dbtypes.ItemInterface+".GetSecret", 0, sessionPath).Store(&secret); err != nil {
+		t.Fatalf("Item.GetSecret over D-Bus after Collection.SearchItems: %v", err)
+	}
+	if string(secret.Value) != "value" {
+		t.Errorf("secret.Value = %q, want %q", string(secret.Value), "value")
+	}
+}
+
+// TestCollectionItemsProperty_ExportsAllItems exercises the third leak site:
+// the Items property accessor on a collection returns paths from the store,
+// so clients that iterate the property and then call Item.GetSecret on each
+// path must find every entry exported on D-Bus.
+func TestCollectionItemsProperty_ExportsAllItems(t *testing.T) {
+	svc, ms, cleanup := newTestService(t)
+	defer cleanup()
+
+	const itemID = "i222222222222222222222222bbbbbbbb"
+	ms.mu.Lock()
+	ms.collections["default"] = &store.CollectionData{Name: "default", Label: "Default"}
+	ms.items["default"] = map[string]*store.ItemData{
+		itemID: {
+			ID:          itemID,
+			Label:       "props secret",
+			Secret:      []byte("v"),
+			ContentType: "text/plain",
+			Attributes:  map[string]string{},
+		},
+	}
+	ms.mu.Unlock()
+
+	sessionPath := openPlainSession(t, svc)
+
+	collObj := svc.conn.Object("org.freedesktop.secrets", dbtypes.CollectionPath("default"))
+	v, err := collObj.GetProperty(dbtypes.CollectionInterface + ".Items")
+	if err != nil {
+		t.Fatalf("GetProperty Items: %v", err)
+	}
+	paths, ok := v.Value().([]dbus.ObjectPath)
+	if !ok {
+		t.Fatalf("Items is not []ObjectPath: %T", v.Value())
+	}
+	wantPath := dbtypes.ItemPath("default", itemID)
+	if !containsPath(paths, wantPath) {
+		t.Fatalf("Items property %v does not contain %s", paths, wantPath)
+	}
+
+	itemObj := svc.conn.Object("org.freedesktop.secrets", wantPath)
+	var secret dbtypes.Secret
+	if err := itemObj.Call(dbtypes.ItemInterface+".GetSecret", 0, sessionPath).Store(&secret); err != nil {
+		t.Fatalf("Item.GetSecret over D-Bus after reading Items property: %v", err)
+	}
+}

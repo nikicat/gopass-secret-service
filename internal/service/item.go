@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -410,4 +411,18 @@ func (m *ItemManager) ExportAllItems(collection string) error {
 	}
 
 	return nil
+}
+
+// EnsureExported guarantees the item at (collection, id) is bound to its D-Bus
+// path before its path is handed to a client. Required wherever we surface a
+// path computed from the store rather than from m.items, since the store can
+// contain items the ItemManager has not yet exported — e.g. items created on
+// disk before the service started, items added via the CLI, or items left
+// non-exported by a previous CreateItem(replace=true) which only updated the
+// store. Export errors are logged but not propagated: dropping one path is
+// strictly better than failing the entire SearchItems call for the others.
+func (m *ItemManager) EnsureExported(collection, id string) {
+	if _, err := m.GetOrCreate(collection, id); err != nil {
+		log.Printf("EnsureExported: failed to export %s/%s: %v", collection, id, err)
+	}
 }
