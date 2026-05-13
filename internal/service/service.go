@@ -26,6 +26,14 @@ type Service struct {
 	items       *ItemManager
 	props       *prop.Properties
 	mu          sync.RWMutex
+
+	// sessionEnabled is true when the kernel keyring backed the session
+	// collection at startup. When false (e.g. in rootless containers where
+	// add_key returns ENOSYS) the daemon refuses to expose the session
+	// collection at all, rather than silently falling back to gopass storage
+	// and breaking the "session writes don't touch the durable store"
+	// contract.
+	sessionEnabled bool
 }
 
 // New creates a new Secret Service
@@ -62,22 +70,26 @@ func New(ctx context.Context, cfg *config.Config) (*Service, error) {
 	}
 
 	// Create the volatile session store backed by the Linux kernel keyring.
-	// On systems without keyring support (rare; kernel >= 2.6.10) this fails;
-	// fall back to gopass-only and log a warning rather than refusing to
-	// start, so the daemon keeps working for clients that don't care about
-	// the session collection.
+	// If the kernel doesn't support add_key (e.g. CONFIG_KEYS=n or rootless
+	// containers in restrictive user namespaces) we leave the session
+	// collection unexposed entirely — falling back to gopass would silently
+	// break the contract that session writes never touch the durable store.
+	// The daemon still starts; default-collection clients keep working.
 	var combined store.Store = gopassStore
+	sessionEnabled := false
 	keyringStore, err := store.NewKeyringStore()
 	if err != nil {
 		log.Printf("Warning: session collection disabled (kernel keyring unavailable): %v", err)
 	} else {
 		combined = store.NewMultiStore(gopassStore, keyringStore)
+		sessionEnabled = true
 	}
 
 	svc := &Service{
-		conn:  conn,
-		store: combined,
-		cfg:   cfg,
+		conn:           conn,
+		store:          combined,
+		cfg:            cfg,
+		sessionEnabled: sessionEnabled,
 	}
 
 	// Initialize managers
@@ -150,13 +162,15 @@ func (s *Service) Start() error {
 		log.Printf("Warning: failed to ensure default collection: %v", err)
 	}
 
-	// Ensure session collection is exported. The store always reports it in
-	// Collections(); the dance below just gets the D-Bus object and the
-	// "session" alias wired up. Harmless if the keyring backend wasn't
-	// available — the dispatcher then routes the collection name to gopass
-	// and behavior is identical to a regular collection.
-	if err := s.ensureSessionCollection(); err != nil {
-		log.Printf("Warning: failed to ensure session collection: %v", err)
+	// Export the session collection and alias only when the keyring backend
+	// is available. Without it, exposing /aliases/session would route writes
+	// to gopass and silently violate the session contract — so we skip the
+	// export entirely. Clients that don't use the session collection see no
+	// difference; ones that do get a clear "no such object" from D-Bus.
+	if s.sessionEnabled {
+		if err := s.ensureSessionCollection(); err != nil {
+			log.Printf("Warning: failed to ensure session collection: %v", err)
+		}
 	}
 
 	return nil

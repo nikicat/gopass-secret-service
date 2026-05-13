@@ -341,6 +341,22 @@ echo ""
 echo "--- Session collection ---"
 echo ""
 
+# The session collection is only exposed when the kernel keyring backend is
+# available (rootless containers in restrictive user namespaces, kernels
+# built without CONFIG_KEYS, etc. won't have it). Detect by asking the daemon
+# to resolve the alias: "/" means no such alias, which means the keyring
+# backend wasn't initialised. Skip session tests in that case rather than
+# failing — non-keyring environments are out-of-contract for this feature.
+SESSION_ALIAS_RESULT=$(dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.Secret.Service.ReadAlias string:session 2>/dev/null | grep "object path" | awk '{print $NF}' | tr -d '"')
+if [ "$SESSION_ALIAS_RESULT" = "/" ] || [ -z "$SESSION_ALIAS_RESULT" ]; then
+    echo -e "${YELLOW}Skipping session tests: kernel keyring unavailable (alias resolves to '$SESSION_ALIAS_RESULT')${NC}"
+    SKIP_SESSION=1
+else
+    SKIP_SESSION=0
+fi
+
+if [ "$SKIP_SESSION" = "0" ]; then
+
 # Test: ReadAlias session resolves to a path (we don't pin the target collection
 # name here — that's an implementation detail — only that the alias exists).
 run_test "ReadAlias session" \
@@ -396,6 +412,8 @@ else
     echo "Service log tail:"
     tail -20 "$LOG_FILE"
 fi
+
+fi  # SKIP_SESSION
 
 echo ""
 echo "=== Test Results ==="
