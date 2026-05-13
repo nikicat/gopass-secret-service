@@ -289,10 +289,10 @@ func TestKeyringStore_ConcurrentCRUD(t *testing.T) {
 	errs := make(chan error, goroutines*opsPerGoroutine)
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		go func(slotID string) {
 			defer wg.Done()
-			for i := 0; i < opsPerGoroutine; i++ {
+			for range opsPerGoroutine {
 				if _, err := s.GetItem(ctx, SessionCollectionName, slotID); err != nil {
 					errs <- err
 					return
