@@ -1,10 +1,18 @@
 // Package store, keyring.go: in-memory session storage backed by the Linux
 // kernel keyring.
 //
-// Items live in a per-daemon child keyring attached to the process keyring.
-// When the daemon exits, the kernel reclaims the keyring; that matches the
-// freedesktop session-collection contract of "non-persistent storage tied to
-// the application session".
+// All kernel keyring syscalls run on a single dedicated OS thread, pinned via
+// runtime.LockOSThread. The reason is non-obvious enough to spell out: in
+// Linux, the references to the process/session/thread keyrings live in the
+// per-task `struct cred`. Resolving KEY_SPEC_PROCESS_KEYRING with create=true
+// calls install_process_keyring → prepare_creds → commit_creds(new), which
+// only updates the *calling task's* cred. Other threads in the same TGID keep
+// pointing at the old cred, so for them cred->process_keyring is NULL and the
+// child keyring we just created isn't reachable via possession from their
+// subscribed keyrings. Add_key syscalls from those threads then fail with
+// EACCES even though the daemon owns the child keyring — they see only
+// USR_VIEW (no USR_WRITE) on it. Pinning all syscalls to one thread sidesteps
+// the per-cred divergence.
 //
 // Quota note: a non-root user has a default of 200 keys / 20 000 bytes per UID
 // (see /proc/sys/kernel/keys/{maxkeys,maxbytes}). OIDC tokens are ~1–5 KB, so
@@ -16,7 +24,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -41,37 +51,112 @@ const (
 // KeyringStore implements Store backed by a per-daemon child of the Linux
 // process keyring. It serves a single collection (SessionCollectionName);
 // callers that want a multi-collection facade should wrap it with MultiStore.
+//
+// All state mutations happen on a single dedicated worker goroutine — see the
+// package comment for why. Methods marshal their work onto that worker via
+// the requests channel and wait for the response.
 type KeyringStore struct {
-	mu        sync.RWMutex
-	ringID    int            // numerical ID of our child keyring
-	items     map[string]int // item ID -> kernel key ID
+	ringID    int
+	items     map[string]int // managed only by the worker goroutine
 	collLabel string
 	collTime  time.Time
+
+	requests   chan keyringJob
+	closed     chan struct{} // signals worker to exit
+	workerDone chan struct{} // worker closes this just before returning
+	closeOnce  sync.Once
 }
 
-// NewKeyringStore creates a child keyring under the process keyring and
-// returns a store that operates on it. The keyring is reclaimed when the
-// daemon process exits.
+// keyringJob is a unit of work for the worker goroutine. fn runs on the
+// pinned thread; its return value travels back via resp.
+type keyringJob struct {
+	fn   func() (any, error)
+	resp chan keyringResult
+}
+
+type keyringResult struct {
+	value any
+	err   error
+}
+
+// NewKeyringStore starts the worker goroutine, has it install the daemon's
+// process keyring and create the child keyring under it, and returns the
+// store. If any of that fails, the worker exits and the error propagates.
 func NewKeyringStore() (*KeyringStore, error) {
+	s := &KeyringStore{
+		items:      make(map[string]int),
+		requests:   make(chan keyringJob),
+		closed:     make(chan struct{}),
+		workerDone: make(chan struct{}),
+	}
+	initDone := make(chan error, 1)
+	go s.worker(initDone)
+	if err := <-initDone; err != nil {
+		// Worker already exited cleanly on init failure.
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *KeyringStore) worker(initDone chan<- error) {
+	runtime.LockOSThread()
+	// Note: we deliberately don't UnlockOSThread on exit. The Go runtime
+	// destroys the thread on goroutine exit if it was locked, which is what
+	// we want — the thread, its cred, and (effectively) the process keyring
+	// child should die with the store.
+	defer close(s.workerDone)
+
 	parent, err := unix.KeyctlGetKeyringID(unix.KEY_SPEC_PROCESS_KEYRING, true)
 	if err != nil {
-		return nil, fmt.Errorf("resolve process keyring: %w", err)
+		initDone <- fmt.Errorf("resolve process keyring: %w", err)
+		return
 	}
 	ringID, err := unix.AddKey("keyring", keyringRootDescription, nil, parent)
 	if err != nil {
-		return nil, fmt.Errorf("create session keyring: %w", err)
+		initDone <- fmt.Errorf("create session keyring: %w", err)
+		return
 	}
-	now := time.Now()
-	return &KeyringStore{
-		ringID:    ringID,
-		items:     make(map[string]int),
-		collLabel: "Session",
-		collTime:  now,
-	}, nil
+	s.ringID = ringID
+	s.collLabel = "Session"
+	s.collTime = time.Now()
+	close(initDone)
+
+	for {
+		select {
+		case <-s.closed:
+			// Best-effort: clear the child keyring so its contents are
+			// reclaimed promptly even if the daemon keeps running.
+			if s.ringID != 0 {
+				_, _ = unix.KeyctlInt(unix.KEYCTL_CLEAR, s.ringID, 0, 0, 0)
+			}
+			s.items = map[string]int{}
+			return
+		case job := <-s.requests:
+			value, err := job.fn()
+			job.resp <- keyringResult{value: value, err: err}
+		}
+	}
 }
 
-// itemPayload is the on-key encoding of an ItemData. ID is omitted because the
-// kernel key's description carries it.
+// do submits fn to the worker and waits for its result.
+func (s *KeyringStore) do(fn func() (any, error)) (any, error) {
+	select {
+	case <-s.closed:
+		return nil, errors.New("keyring store is closed")
+	default:
+	}
+	resp := make(chan keyringResult, 1)
+	select {
+	case s.requests <- keyringJob{fn: fn, resp: resp}:
+	case <-s.closed:
+		return nil, errors.New("keyring store is closed")
+	}
+	r := <-resp
+	return r.value, r.err
+}
+
+// --- payload encoding (id is the kernel key's description, not in payload) ---
+
 type itemPayload struct {
 	Label       string            `json:"label,omitempty"`
 	Secret      []byte            `json:"secret,omitempty"`
@@ -108,9 +193,7 @@ func decodeItem(id string, payload []byte) (*ItemData, error) {
 	}, nil
 }
 
-// readKeyPayload returns the payload bytes of a kernel key. The kernel
-// truncates if our buffer is too small but reports the true size; we use a
-// buffer at the per-key cap so a single read suffices.
+// readKeyPayload runs on the worker thread. Caller must be on the worker.
 func readKeyPayload(keyID int) ([]byte, error) {
 	buf := make([]byte, keyringMaxPayload)
 	n, err := unix.KeyctlBuffer(unix.KEYCTL_READ, keyID, buf, len(buf))
@@ -138,15 +221,19 @@ func (s *KeyringStore) GetCollection(ctx context.Context, name string) (*Collect
 	if err := s.checkColl(name); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return &CollectionData{
-		Name:     name,
-		Label:    s.collLabel,
-		Created:  s.collTime,
-		Modified: s.collTime,
-		Locked:   false,
-	}, nil
+	v, err := s.do(func() (any, error) {
+		return &CollectionData{
+			Name:     SessionCollectionName,
+			Label:    s.collLabel,
+			Created:  s.collTime,
+			Modified: s.collTime,
+			Locked:   false,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*CollectionData), nil
 }
 
 // CreateCollection is a label-only operation here: the session keyring is
@@ -156,12 +243,13 @@ func (s *KeyringStore) CreateCollection(ctx context.Context, name, label string)
 	if err := s.checkColl(name); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if label != "" {
-		s.collLabel = label
-	}
-	return nil
+	_, err := s.do(func() (any, error) {
+		if label != "" {
+			s.collLabel = label
+		}
+		return nil, nil
+	})
+	return err
 }
 
 func (s *KeyringStore) DeleteCollection(ctx context.Context, name string) error {
@@ -172,42 +260,51 @@ func (s *KeyringStore) SetCollectionLabel(ctx context.Context, name, label strin
 	if err := s.checkColl(name); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.collLabel = label
-	s.collTime = time.Now()
-	return nil
+	_, err := s.do(func() (any, error) {
+		s.collLabel = label
+		s.collTime = time.Now()
+		return nil, nil
+	})
+	return err
 }
 
 func (s *KeyringStore) Items(ctx context.Context, collection string) ([]string, error) {
 	if err := s.checkColl(collection); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	ids := make([]string, 0, len(s.items))
-	for id := range s.items {
-		ids = append(ids, id)
+	v, err := s.do(func() (any, error) {
+		ids := make([]string, 0, len(s.items))
+		for id := range s.items {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return ids, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(ids)
-	return ids, nil
+	return v.([]string), nil
 }
 
 func (s *KeyringStore) GetItem(ctx context.Context, collection, id string) (*ItemData, error) {
 	if err := s.checkColl(collection); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	keyID, ok := s.items[id]
-	s.mu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("item not found: %s", id)
-	}
-	payload, err := readKeyPayload(keyID)
+	v, err := s.do(func() (any, error) {
+		keyID, ok := s.items[id]
+		if !ok {
+			return nil, fmt.Errorf("item not found: %s", id)
+		}
+		payload, err := readKeyPayload(keyID)
+		if err != nil {
+			return nil, err
+		}
+		return decodeItem(id, payload)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return decodeItem(id, payload)
+	return v.(*ItemData), nil
 }
 
 // CreateItem assigns an ID if absent and stores the item as a fresh kernel
@@ -229,19 +326,22 @@ func (s *KeyringStore) CreateItem(ctx context.Context, collection string, item *
 	if item.ContentType == "" {
 		item.ContentType = "text/plain"
 	}
-
 	payload, err := encodeItem(item)
 	if err != nil {
 		return "", err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	keyID, err := unix.AddKey(keyringKeyType, item.ID, payload, s.ringID)
+	v, err := s.do(func() (any, error) {
+		keyID, err := unix.AddKey(keyringKeyType, item.ID, payload, s.ringID)
+		if err != nil {
+			return "", fmt.Errorf("add key: %w", err)
+		}
+		s.items[item.ID] = keyID
+		return item.ID, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("add key: %w", err)
+		return "", err
 	}
-	s.items[item.ID] = keyID
-	return item.ID, nil
+	return v.(string), nil
 }
 
 // UpdateItem rewrites the payload of an existing item, preserving Created.
@@ -251,71 +351,78 @@ func (s *KeyringStore) UpdateItem(ctx context.Context, collection, id string, it
 	if err := s.checkColl(collection); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	existingID, ok := s.items[id]
-	if !ok {
-		return fmt.Errorf("item not found: %s", id)
-	}
-	// Preserve Created from the on-disk record.
-	if existingPayload, err := readKeyPayload(existingID); err == nil {
-		if prev, err := decodeItem(id, existingPayload); err == nil {
-			item.Created = prev.Created
+	_, err := s.do(func() (any, error) {
+		existingID, ok := s.items[id]
+		if !ok {
+			return nil, fmt.Errorf("item not found: %s", id)
 		}
-	}
-	item.ID = id
-	item.Modified = time.Now()
-	if item.ContentType == "" {
-		item.ContentType = "text/plain"
-	}
-	payload, err := encodeItem(item)
-	if err != nil {
-		return err
-	}
-	keyID, err := unix.AddKey(keyringKeyType, id, payload, s.ringID)
-	if err != nil {
-		return fmt.Errorf("update key: %w", err)
-	}
-	s.items[id] = keyID
-	return nil
+		if existingPayload, err := readKeyPayload(existingID); err == nil {
+			if prev, err := decodeItem(id, existingPayload); err == nil {
+				item.Created = prev.Created
+			}
+		}
+		item.ID = id
+		item.Modified = time.Now()
+		if item.ContentType == "" {
+			item.ContentType = "text/plain"
+		}
+		payload, err := encodeItem(item)
+		if err != nil {
+			return nil, err
+		}
+		keyID, err := unix.AddKey(keyringKeyType, id, payload, s.ringID)
+		if err != nil {
+			return nil, fmt.Errorf("update key: %w", err)
+		}
+		s.items[id] = keyID
+		return nil, nil
+	})
+	return err
 }
 
 func (s *KeyringStore) DeleteItem(ctx context.Context, collection, id string) error {
 	if err := s.checkColl(collection); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	keyID, ok := s.items[id]
-	if !ok {
-		return fmt.Errorf("item not found: %s", id)
-	}
-	if _, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, keyID, s.ringID, 0, 0); err != nil {
-		return fmt.Errorf("unlink key %d: %w", keyID, err)
-	}
-	delete(s.items, id)
-	return nil
+	_, err := s.do(func() (any, error) {
+		keyID, ok := s.items[id]
+		if !ok {
+			return nil, fmt.Errorf("item not found: %s", id)
+		}
+		if _, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, keyID, s.ringID, 0, 0); err != nil {
+			return nil, fmt.Errorf("unlink key %d: %w", keyID, err)
+		}
+		delete(s.items, id)
+		return nil, nil
+	})
+	return err
 }
 
 func (s *KeyringStore) SearchItems(ctx context.Context, collection string, attributes map[string]string) ([]*ItemData, error) {
 	if err := s.checkColl(collection); err != nil {
 		return nil, err
 	}
-	ids, err := s.Items(ctx, collection)
+	v, err := s.do(func() (any, error) {
+		var matches []*ItemData
+		for id, keyID := range s.items {
+			payload, err := readKeyPayload(keyID)
+			if err != nil {
+				continue
+			}
+			item, err := decodeItem(id, payload)
+			if err != nil {
+				continue
+			}
+			if matchesAttributes(item, attributes) {
+				matches = append(matches, item)
+			}
+		}
+		return matches, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var matches []*ItemData
-	for _, id := range ids {
-		item, err := s.GetItem(ctx, collection, id)
-		if err != nil {
-			continue
-		}
-		if matchesAttributes(item, attributes) {
-			matches = append(matches, item)
-		}
-	}
-	return matches, nil
+	return v.([]*ItemData), nil
 }
 
 func (s *KeyringStore) SearchAllItems(ctx context.Context, attributes map[string]string) (map[string][]*ItemData, error) {
@@ -350,18 +457,14 @@ func (s *KeyringStore) SetAlias(ctx context.Context, alias, collection string) e
 	return fmt.Errorf("keyring store does not support SetAlias")
 }
 
-// Close clears the child keyring. The kernel would reclaim it when the process
-// exits regardless; explicit clear lets unit tests run multiple stores cleanly
-// in the same process.
+// Close signals the worker to clear the child keyring and exit, then blocks
+// until the worker is fully done. Safe to call multiple times.
 func (s *KeyringStore) Close(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ringID == 0 {
-		return nil
+	s.closeOnce.Do(func() { close(s.closed) })
+	select {
+	case <-s.workerDone:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if _, err := unix.KeyctlInt(unix.KEYCTL_CLEAR, s.ringID, 0, 0, 0); err != nil {
-		return fmt.Errorf("clear session keyring: %w", err)
-	}
-	s.items = map[string]int{}
 	return nil
 }
