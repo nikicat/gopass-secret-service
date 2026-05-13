@@ -54,16 +54,29 @@ func New(ctx context.Context, cfg *config.Config) (*Service, error) {
 		}
 	}
 
-	// Create the store
+	// Create the durable (gopass) store.
 	gopassStore, err := store.NewGopassStore(ctx, cfg.Prefix)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to create gopass store: %w", err)
 	}
 
+	// Create the volatile session store backed by the Linux kernel keyring.
+	// On systems without keyring support (rare; kernel >= 2.6.10) this fails;
+	// fall back to gopass-only and log a warning rather than refusing to
+	// start, so the daemon keeps working for clients that don't care about
+	// the session collection.
+	var combined store.Store = gopassStore
+	keyringStore, err := store.NewKeyringStore()
+	if err != nil {
+		log.Printf("Warning: session collection disabled (kernel keyring unavailable): %v", err)
+	} else {
+		combined = store.NewMultiStore(gopassStore, keyringStore)
+	}
+
 	svc := &Service{
 		conn:  conn,
-		store: gopassStore,
+		store: combined,
 		cfg:   cfg,
 	}
 
@@ -135,6 +148,15 @@ func (s *Service) Start() error {
 	// Ensure default collection exists
 	if err := s.ensureDefaultCollection(); err != nil {
 		log.Printf("Warning: failed to ensure default collection: %v", err)
+	}
+
+	// Ensure session collection is exported. The store always reports it in
+	// Collections(); the dance below just gets the D-Bus object and the
+	// "session" alias wired up. Harmless if the keyring backend wasn't
+	// available — the dispatcher then routes the collection name to gopass
+	// and behavior is identical to a regular collection.
+	if err := s.ensureSessionCollection(); err != nil {
+		log.Printf("Warning: failed to ensure session collection: %v", err)
 	}
 
 	return nil
@@ -500,6 +522,21 @@ func (s *Service) exportAlias(alias string, coll *Collection) {
 	if err := coll.ExportAtPath(dbtypes.AliasPath(alias)); err != nil {
 		log.Printf("Warning: failed to export alias %s: %v", alias, err)
 	}
+}
+
+func (s *Service) ensureSessionCollection() error {
+	ctx := context.Background()
+	if err := s.store.CreateCollection(ctx, store.SessionCollectionName, "Session"); err != nil {
+		return fmt.Errorf("create session collection: %w", err)
+	}
+	coll, err := s.collections.GetOrCreate(store.SessionCollectionName)
+	if err != nil {
+		return fmt.Errorf("export session collection: %w", err)
+	}
+	s.exportAlias("session", coll)
+	s.refreshCollections()
+	log.Printf("Exported session alias for collection %s", store.SessionCollectionName)
+	return nil
 }
 
 func (s *Service) introspectionXML() string {
