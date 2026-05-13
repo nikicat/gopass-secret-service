@@ -269,10 +269,6 @@ func TestKeyringStore_ConcurrentCRUD(t *testing.T) {
 	const goroutines = 6
 	const opsPerGoroutine = 10
 
-	type slot struct {
-		id  string
-		err error
-	}
 	ids := make([]string, goroutines)
 	for i := range ids {
 		id, err := s.CreateItem(ctx, SessionCollectionName, &ItemData{

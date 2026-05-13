@@ -157,8 +157,8 @@ func (f *fakeStore) Close(ctx context.Context) error {
 func newMulti() (*MultiStore, *fakeStore, *fakeStore) {
 	primary := newFakeStore("primary")
 	session := newFakeStore("session")
-	primary.CreateCollection(context.Background(), "default", "Default")
-	session.CreateCollection(context.Background(), SessionCollectionName, "Session")
+	_ = primary.CreateCollection(context.Background(), "default", "Default")
+	_ = session.CreateCollection(context.Background(), SessionCollectionName, "Session")
 	return NewMultiStore(primary, session), primary, session
 }
 
@@ -205,7 +205,7 @@ func TestMultiStore_SessionCollectionsNotDuplicated(t *testing.T) {
 	// in practice but defend against it), MultiStore must not double it.
 	primary := newFakeStore("primary")
 	session := newFakeStore("session")
-	primary.CreateCollection(context.Background(), SessionCollectionName, "old")
+	_ = primary.CreateCollection(context.Background(), SessionCollectionName, "old")
 	m := NewMultiStore(primary, session)
 
 	cols, _ := m.Collections(context.Background())
