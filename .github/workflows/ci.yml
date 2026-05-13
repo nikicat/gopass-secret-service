@@ -102,5 +102,10 @@ jobs:
       - name: Build Docker image
         run: docker build -t gopass-secret-test .
 
+      # seccomp=unconfined is needed for the session-collection tests: the
+      # default Docker seccomp profile blocks add_key/keyctl/request_key, so
+      # without this the daemon falls back to "session unavailable" and the
+      # session-collection assertions are skipped — defeating their purpose.
+      # Scope is the test container only.
       - name: Run integration tests
-        run: docker run --rm gopass-secret-test
+        run: docker run --rm --security-opt seccomp=unconfined gopass-secret-test
