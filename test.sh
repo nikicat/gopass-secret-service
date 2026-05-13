@@ -338,6 +338,66 @@ else
 fi
 
 echo ""
+echo "--- Session collection ---"
+echo ""
+
+# Test: ReadAlias session resolves to a path (we don't pin the target collection
+# name here — that's an implementation detail — only that the alias exists).
+run_test "ReadAlias session" \
+    "dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets org.freedesktop.Secret.Service.ReadAlias string:session"
+
+# Test: session collection is reachable via the alias path.
+run_test "Session collection via alias path" \
+    "dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets/aliases/session org.freedesktop.DBus.Properties.Get string:'org.freedesktop.Secret.Collection' string:'Label'"
+
+# Test: session collection is reachable via its canonical path.
+run_test "Session collection via regular path" \
+    "dbus-send --session --print-reply --dest=org.freedesktop.secrets /org/freedesktop/secrets/collection/session org.freedesktop.DBus.Properties.Get string:'org.freedesktop.Secret.Collection' string:'Label'"
+
+# Tests: store/lookup through the session collection AND confirm no gopass
+# commit happens — the whole point of the session backend.
+SESS_TAG="session-$$"
+COMMITS_BEFORE=$(git -C "$GOPASS_STORE" rev-list --count HEAD 2>/dev/null || echo 0)
+
+echo -n "Test: Store secret in session collection... "
+if echo "session-payload-$$" | timeout 10 secret-tool store --label="Session $$" --collection session test-session "$SESS_TAG" 2>&1; then
+    echo -e "${GREEN}PASSED${NC}"
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+
+    echo -n "Test: Lookup session secret... "
+    RETRIEVED=$(timeout 10 secret-tool lookup test-session "$SESS_TAG" 2>&1)
+    if [ "$RETRIEVED" = "session-payload-$$" ]; then
+        echo -e "${GREEN}PASSED${NC}"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAILED${NC} (got: '$RETRIEVED')"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # The contract: writes against the session collection don't reach gopass.
+    # If this assertion fails, attribute-based routing has broken or the
+    # session collection regressed to gopass storage.
+    echo -n "Test: Session write did not commit to gopass... "
+    COMMITS_AFTER=$(git -C "$GOPASS_STORE" rev-list --count HEAD 2>/dev/null || echo 0)
+    if [ "$COMMITS_BEFORE" = "$COMMITS_AFTER" ]; then
+        echo -e "${GREEN}PASSED${NC} ($COMMITS_BEFORE commits before/after)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        echo -e "${RED}FAILED${NC} (commits: $COMMITS_BEFORE -> $COMMITS_AFTER)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # Confirm we can also delete the session item via the same secret-tool
+    # path. (clear is best-effort cleanup; don't gate the suite on it.)
+    timeout 10 secret-tool clear test-session "$SESS_TAG" >/dev/null 2>&1 || true
+else
+    echo -e "${RED}FAILED${NC}"
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo "Service log tail:"
+    tail -20 "$LOG_FILE"
+fi
+
+echo ""
 echo "=== Test Results ==="
 echo -e "Passed: ${GREEN}$TESTS_PASSED${NC}"
 echo -e "Failed: ${RED}$TESTS_FAILED${NC}"
