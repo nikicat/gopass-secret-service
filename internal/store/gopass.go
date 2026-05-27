@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,18 @@ type GopassStore struct {
 	store  gopass.Store
 	mapper *Mapper
 	locked map[string]bool // collection name -> locked state
+
+	// metaCache memoizes the decrypted *metadata* of an entry (its gopass
+	// Keys()/values: labels, timestamps and searchable attributes) keyed by
+	// store path. It deliberately never holds the secret payload (Password or
+	// Body): SearchItems only needs attributes to match, and decryption
+	// dominates its latency, so caching metadata turns a per-lookup O(N)
+	// decryption of the whole collection into a single decryption per entry.
+	// The actual secret value is always re-decrypted on demand in GetItem and
+	// never retained. Entries are invalidated on every local mutation; there is
+	// no TTL, so out-of-process changes require a daemon restart.
+	cacheMu   sync.RWMutex
+	metaCache map[string]map[string]string
 }
 
 // NewGopassStore creates a new GoPass-backed store
@@ -37,13 +50,108 @@ func NewGopassStore(ctx context.Context, prefix string) (*GopassStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize gopass: %w", err)
 	}
-	// Cache decrypted secrets in memory so repeated SearchItems calls don't
-	// re-decrypt the whole collection on every lookup. See cachingStore.
+	return NewGopassStoreWithBackend(store, prefix), nil
+}
+
+// NewGopassStoreWithBackend builds a store over an arbitrary gopass.Store
+// backend. It is the dependency-injection seam used by tests to substitute a
+// fake backend; production code uses NewGopassStore.
+func NewGopassStoreWithBackend(backend gopass.Store, prefix string) *GopassStore {
 	return &GopassStore{
-		store:  newCachingStore(store),
-		mapper: NewMapper(prefix),
-		locked: make(map[string]bool),
-	}, nil
+		store:     backend,
+		mapper:    NewMapper(prefix),
+		locked:    make(map[string]bool),
+		metaCache: make(map[string]map[string]string),
+	}
+}
+
+// metaFromSecret extracts a decrypted entry's metadata key/value pairs. By
+// construction it copies only gopass Keys() — never Password() or Body() — so
+// the result is safe to cache without retaining the secret value.
+func metaFromSecret(sec gopass.Secret) map[string]string {
+	keys := sec.Keys()
+	m := make(map[string]string, len(keys))
+	for _, k := range keys {
+		if v, ok := sec.Get(k); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// metaFor returns an entry's cached metadata, decrypting and caching it on the
+// first access. The secret payload is discarded after extraction.
+func (s *GopassStore) metaFor(ctx context.Context, path string) (map[string]string, error) {
+	s.cacheMu.RLock()
+	m, ok := s.metaCache[path]
+	s.cacheMu.RUnlock()
+	if ok {
+		return m, nil
+	}
+
+	sec, err := s.store.Get(ctx, path, "latest")
+	if err != nil {
+		return nil, err
+	}
+	m = metaFromSecret(sec)
+
+	s.cacheMu.Lock()
+	s.metaCache[path] = m
+	s.cacheMu.Unlock()
+	return m, nil
+}
+
+// putMeta refreshes the cached metadata for a path (used when an entry has just
+// been decrypted for another reason).
+func (s *GopassStore) putMeta(path string, meta map[string]string) {
+	s.cacheMu.Lock()
+	s.metaCache[path] = meta
+	s.cacheMu.Unlock()
+}
+
+// invalidateMeta drops the cached metadata for a single path.
+func (s *GopassStore) invalidateMeta(path string) {
+	s.cacheMu.Lock()
+	delete(s.metaCache, path)
+	s.cacheMu.Unlock()
+}
+
+// invalidateMetaPrefix drops cached metadata for a path and everything beneath
+// it (used when a whole collection is removed).
+func (s *GopassStore) invalidateMetaPrefix(prefix string) {
+	s.cacheMu.Lock()
+	for k := range s.metaCache {
+		if k == prefix || strings.HasPrefix(k, prefix+"/") {
+			delete(s.metaCache, k)
+		}
+	}
+	s.cacheMu.Unlock()
+}
+
+// applyItemMeta fills an ItemData's metadata fields from a cached metadata map.
+// It never touches ItemData.Secret.
+func applyItemMeta(item *ItemData, meta map[string]string) {
+	for key, val := range meta {
+		switch key {
+		case labelKey:
+			item.Label = val
+		case createdKey:
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
+				item.Created = ts
+			}
+		case modifiedKey:
+			if ts, err := time.Parse(time.RFC3339, val); err == nil {
+				item.Modified = ts
+			}
+		case contentTypeKey:
+			item.ContentType = val
+		default:
+			// Regular attribute (skip internal metadata)
+			if !strings.HasPrefix(key, metaPrefix) {
+				item.Attributes[key] = val
+			}
+		}
+	}
 }
 
 // Collections returns all collection names
@@ -85,7 +193,7 @@ func (s *GopassStore) Collections(ctx context.Context) ([]string, error) {
 func (s *GopassStore) GetCollection(ctx context.Context, name string) (*CollectionData, error) {
 	metaPath := s.mapper.CollectionMetaPath(name)
 
-	sec, err := s.store.Get(ctx, metaPath, "latest")
+	meta, err := s.metaFor(ctx, metaPath)
 	if err != nil {
 		// Check if collection exists by looking for any items
 		items, err := s.Items(ctx, name)
@@ -122,11 +230,7 @@ func (s *GopassStore) GetCollection(ctx context.Context, name string) (*Collecti
 		Locked: s.locked[name],
 	}
 
-	for _, key := range sec.Keys() {
-		val, ok := sec.Get(key)
-		if !ok {
-			continue
-		}
+	for key, val := range meta {
 		switch key {
 		case collLabelKey:
 			data.Label = val
@@ -163,13 +267,21 @@ func (s *GopassStore) CreateCollection(ctx context.Context, name, label string) 
 		return fmt.Errorf("set modified: %w", err)
 	}
 
-	return s.store.Set(ctx, metaPath, sec)
+	if err := s.store.Set(ctx, metaPath, sec); err != nil {
+		return err
+	}
+	s.invalidateMeta(metaPath)
+	return nil
 }
 
 // DeleteCollection deletes a collection and all its items
 func (s *GopassStore) DeleteCollection(ctx context.Context, name string) error {
 	collPath := s.mapper.CollectionPath(name)
-	return s.store.RemoveAll(ctx, collPath)
+	if err := s.store.RemoveAll(ctx, collPath); err != nil {
+		return err
+	}
+	s.invalidateMetaPrefix(collPath)
+	return nil
 }
 
 // SetCollectionLabel updates a collection's label
@@ -194,7 +306,11 @@ func (s *GopassStore) SetCollectionLabel(ctx context.Context, name, label string
 		return fmt.Errorf("set modified: %w", err)
 	}
 
-	return s.store.Set(ctx, metaPath, sec)
+	if err := s.store.Set(ctx, metaPath, sec); err != nil {
+		return err
+	}
+	s.invalidateMeta(metaPath)
+	return nil
 }
 
 // Items returns all item IDs in a collection
@@ -232,10 +348,15 @@ func (s *GopassStore) Items(ctx context.Context, collection string) ([]string, e
 func (s *GopassStore) GetItem(ctx context.Context, collection, id string) (*ItemData, error) {
 	itemPath := s.mapper.ItemPath(collection, id)
 
+	// Secret retrieval always decrypts fresh — the password is never cached.
 	sec, err := s.store.Get(ctx, itemPath, "latest")
 	if err != nil {
 		return nil, fmt.Errorf("item not found: %s/%s", collection, id)
 	}
+
+	// Refresh the metadata cache opportunistically since we just decrypted.
+	meta := metaFromSecret(sec)
+	s.putMeta(itemPath, meta)
 
 	item := &ItemData{
 		ID:          id,
@@ -243,42 +364,19 @@ func (s *GopassStore) GetItem(ctx context.Context, collection, id string) (*Item
 		ContentType: "text/plain",
 		Attributes:  make(map[string]string),
 	}
-
-	for _, key := range sec.Keys() {
-		val, ok := sec.Get(key)
-		if !ok {
-			continue
-		}
-
-		switch key {
-		case labelKey:
-			item.Label = val
-		case createdKey:
-			if ts, err := time.Parse(time.RFC3339, val); err == nil {
-				item.Created = ts
-			}
-		case modifiedKey:
-			if ts, err := time.Parse(time.RFC3339, val); err == nil {
-				item.Modified = ts
-			}
-		case contentTypeKey:
-			item.ContentType = val
-		default:
-			// Regular attribute (skip internal metadata)
-			if !strings.HasPrefix(key, metaPrefix) {
-				item.Attributes[key] = val
-			}
-		}
-	}
+	applyItemMeta(item, meta)
 
 	return item, nil
 }
 
 // CreateItem creates a new item in a collection
 func (s *GopassStore) CreateItem(ctx context.Context, collection string, item *ItemData) (string, error) {
-	// Generate UUID if not provided
+	// Generate a D-Bus-safe ID if not provided. The ID becomes an object-path
+	// element, which forbids hyphens, so use the same "i"+hex encoding as the
+	// keyring store and the service layer rather than a raw hyphenated UUID.
 	if item.ID == "" {
-		item.ID = uuid.New().String()
+		rawID := uuid.New()
+		item.ID = fmt.Sprintf("i%x", rawID[:])
 	}
 
 	// Ensure collection exists
@@ -329,6 +427,7 @@ func (s *GopassStore) CreateItem(ctx context.Context, collection string, item *I
 	if err := s.store.Set(ctx, itemPath, sec); err != nil {
 		return "", err
 	}
+	s.invalidateMeta(itemPath)
 
 	return item.ID, nil
 }
@@ -375,13 +474,21 @@ func (s *GopassStore) UpdateItem(ctx context.Context, collection, id string, ite
 	}
 
 	itemPath := s.mapper.ItemPath(collection, id)
-	return s.store.Set(ctx, itemPath, sec)
+	if err := s.store.Set(ctx, itemPath, sec); err != nil {
+		return err
+	}
+	s.invalidateMeta(itemPath)
+	return nil
 }
 
 // DeleteItem deletes an item
 func (s *GopassStore) DeleteItem(ctx context.Context, collection, id string) error {
 	itemPath := s.mapper.ItemPath(collection, id)
-	return s.store.Remove(ctx, itemPath)
+	if err := s.store.Remove(ctx, itemPath); err != nil {
+		return err
+	}
+	s.invalidateMeta(itemPath)
+	return nil
 }
 
 // SearchItems searches for items matching the given attributes
@@ -393,10 +500,20 @@ func (s *GopassStore) SearchItems(ctx context.Context, collection string, attrib
 
 	var results []*ItemData
 	for _, id := range items {
-		item, err := s.GetItem(ctx, collection, id)
+		// Matching needs only attributes, so read cached metadata rather than
+		// decrypting the secret. The returned ItemData carries no Secret; the
+		// payload is decrypted lazily by GetItem when a secret is actually read.
+		meta, err := s.metaFor(ctx, s.mapper.ItemPath(collection, id))
 		if err != nil {
 			continue
 		}
+
+		item := &ItemData{
+			ID:          id,
+			ContentType: "text/plain",
+			Attributes:  make(map[string]string),
+		}
+		applyItemMeta(item, meta)
 
 		if matchesAttributes(item, attributes) {
 			results = append(results, item)
