@@ -37,8 +37,10 @@ func NewGopassStore(ctx context.Context, prefix string) (*GopassStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize gopass: %w", err)
 	}
+	// Cache decrypted secrets in memory so repeated SearchItems calls don't
+	// re-decrypt the whole collection on every lookup. See cachingStore.
 	return &GopassStore{
-		store:  store,
+		store:  newCachingStore(store),
 		mapper: NewMapper(prefix),
 		locked: make(map[string]bool),
 	}, nil
