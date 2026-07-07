@@ -101,6 +101,14 @@ func TestSanitizeName(t *testing.T) {
 		{"with/slash", "with_slash"},
 		{"with\\backslash", "with_backslash"},
 		{"multiple spaces here", "multiple_spaces_here"},
+		// Path-traversal segments must not survive as "." or ".."
+		{".", "_"},
+		{"..", "__"},
+		{"../..", ".._.."},
+		// Ordinary dotted names are left intact.
+		{"github.com", "github.com"},
+		{"...", "..."},
+		{".hidden", ".hidden"},
 	}
 
 	for _, tc := range tests {

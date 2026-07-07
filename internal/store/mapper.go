@@ -61,11 +61,22 @@ func (m *Mapper) IsAliases(gopassPath string) bool {
 	return gopassPath == m.AliasesPath()
 }
 
-// SanitizeName sanitizes a name for use in GoPass paths
+// SanitizeName sanitizes a caller-supplied name for use as a single GoPass
+// path segment. It collapses path separators to underscores and neutralizes
+// the "." and ".." segments, which path.Join/path.Clean treat as traversal,
+// so a name can never resolve outside the store prefix.
 func SanitizeName(name string) string {
 	// Replace problematic characters with underscores
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.ReplaceAll(name, " ", "_")
+	// After separator collapsing the name is a single segment; the only
+	// values that can escape or collapse the prefix are "." and "..".
+	switch name {
+	case ".":
+		return "_"
+	case "..":
+		return "__"
+	}
 	return name
 }
