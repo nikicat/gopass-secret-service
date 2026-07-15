@@ -56,20 +56,23 @@ Add per-operation approval, trust rules, and audit logging on top of gopass-secr
 **Prerequisites:** [GoPass](https://www.gopass.pw/) installed and configured with a GPG key.
 
 ```bash
-# Install
-git clone https://github.com/nikicat/gopass-secret-service.git
-cd gopass-secret-service
-make build && make install   # installs to ~/.local/bin
+# Install — prebuilt static binary (linux amd64/arm64)
+curl -Lo ~/.local/bin/gopass-secret \
+  https://github.com/nikicat/gopass-secret-service/releases/latest/download/gopass-secret-linux-amd64
+chmod +x ~/.local/bin/gopass-secret
 
-# Start (replace GNOME Keyring if running)
-gopass-secret-service -r &
+# ...or with Go
+go install github.com/nikicat/gopass-secret-service/cmd/gopass-secret@latest
+
+# Start the daemon (replace GNOME Keyring if running)
+gopass-secret service -r &
 
 # Verify — store and retrieve a secret
 echo "test123" | secret-tool store --label='Test' app test
 secret-tool lookup app test   # → test123
 
 # Install as a systemd user service (auto-start on login)
-gopass-secret-service install
+gopass-secret service install
 ```
 
 ## Replacing GNOME Keyring
@@ -78,10 +81,10 @@ The most common setup — use gopass-secret-service instead of GNOME Keyring for
 
 ```bash
 # One-time: start with --replace to take over the D-Bus name
-gopass-secret-service -r
+gopass-secret service -r
 
 # Permanent: install as a systemd user service
-gopass-secret-service install
+gopass-secret service install
 systemctl --user start gopass-secret-service
 ```
 
@@ -96,6 +99,22 @@ echo "Hidden=true" >> ~/.config/autostart/gnome-keyring-secrets.desktop
 Or simply use the `-r` / `--replace` flag — gopass-secret-service will take over from whatever is currently running.
 
 ## Installation
+
+### Prebuilt Binaries
+
+Each [release](https://github.com/nikicat/gopass-secret-service/releases) ships static Linux binaries (amd64/arm64) plus a `checksums.txt`:
+
+```bash
+curl -Lo ~/.local/bin/gopass-secret \
+  https://github.com/nikicat/gopass-secret-service/releases/latest/download/gopass-secret-linux-amd64
+chmod +x ~/.local/bin/gopass-secret
+```
+
+### With Go
+
+```bash
+go install github.com/nikicat/gopass-secret-service/cmd/gopass-secret@latest
+```
 
 ### Build from Source
 
@@ -128,11 +147,14 @@ make help                        # Show all available targets
 ## Usage
 
 ```bash
-gopass-secret-service              # start in foreground
-gopass-secret-service -r           # replace existing provider (e.g., GNOME Keyring)
-gopass-secret-service -d           # debug logging
-gopass-secret-service install      # install systemd user service
-gopass-secret-service uninstall    # remove systemd user service
+gopass-secret service              # run the D-Bus daemon in the foreground
+gopass-secret service -r           # replace existing provider (e.g., GNOME Keyring)
+gopass-secret service -d           # debug logging
+gopass-secret service install      # install systemd user service
+gopass-secret service uninstall    # remove systemd user service
+
+gopass-secret add|get|list         # manage secrets from the CLI
+gopass-secret config               # show effective configuration
 ```
 
 See the [full CLI, configuration, and environment variable reference](docs/README.md) for all options.
