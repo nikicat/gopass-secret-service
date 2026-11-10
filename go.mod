@@ -39,3 +39,5 @@ require (
 	github.com/zalando/go-keyring v0.2.6 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 )
+
+replace github.com/godbus/dbus/v5 => github.com/nikicat/dbus/v5 v5.2.5-0.20261110133014-b3713a786249
